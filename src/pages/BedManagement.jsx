@@ -1,39 +1,33 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
+import DailyRoundModal from '../components/DailyRoundModal';
 
 // ── Bed Card ──────────────────────────────────────────────────────────────────
 
-function BedCard({ bed, onUpdate, onDischarge }) {
+function BedCard({ bed, onUpdate, onDischarge, onUpdateRound }) {
     const { bed_id, id, bed_number, status, patient, admission, notes } = bed;
-    
-    // Use bed_id if available, fallback to id
+
     const bedId = bed_id || id;
-
-    // Map database status to UI format
     const displayId = bed_number || bedId?.slice(0, 8);
-
-    // Helpers for admission data
-    const timeAgo = (isoString) => {
-        if (!isoString) return '';
-        const diffMs = Date.now() - new Date(isoString).getTime();
-        const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
-        const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
-        if (diffDays > 0) return `${diffDays}d ago`;
-        if (diffHours > 0) return `${diffHours}h ago`;
-        return 'recently';
-    };
-
-    const getTimeLeft = (isoString) => {
-        if (!isoString) return '~1d left';
-        const diffMs = new Date(isoString).getTime() - Date.now();
-        if (diffMs < 0) return 'Overdue';
-        const h = Math.floor(diffMs / (1000 * 60 * 60));
-        if (h > 24) return `~${Math.floor(h / 24)}d left`;
-        return `~${h}h left`;
-    };
-
     const isICU = bed.bed_type === 'icu';
     const isGeneral = bed.bed_type === 'general';
+
+    const fmt = (iso) => {
+        if (!iso) return null;
+        const d = new Date(iso);
+        return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: '2-digit' });
+    };
+
+    const countdown = (dischargeIso) => {
+        if (!dischargeIso) return null;
+        const diffMs = new Date(dischargeIso).getTime() - Date.now();
+        if (diffMs <= 0) return { label: 'Overdue', color: 'text-red-500' };
+        const days = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+        return {
+            label: `${days}d left`,
+            color: days <= 1 ? 'text-amber-500' : 'text-emerald-600'
+        };
+    };
 
     if (status === 'available') {
         const bgColor = isICU ? 'bg-yellow-500' : 'bg-green-500';
@@ -45,9 +39,9 @@ function BedCard({ bed, onUpdate, onDischarge }) {
         return (
             <div className={`group bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md ${borderColor} transition-all cursor-pointer relative overflow-hidden flex flex-col h-full`}>
                 <div className={`h-1 ${bgColor} w-full absolute top-0`} />
-                <div className="p-4 flex flex-col h-full justify-between">
+                <div className="p-5 flex flex-col h-full justify-between">
                     <div className="flex justify-between items-start">
-                        <span className="font-bold text-slate-900 text-lg">{displayId}</span>
+                        <span className="font-bold text-slate-900 text-xl">{displayId}</span>
                         <span className={`px-2 py-0.5 rounded text-xs font-semibold ${badgeColor}`}>Available</span>
                     </div>
                     <div className="flex-1 flex items-center justify-center my-4">
@@ -69,9 +63,9 @@ function BedCard({ bed, onUpdate, onDischarge }) {
     if (status === 'cleaning' || status === 'maintenance') return (
         <div className="group bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md hover:border-yellow-500/50 transition-all cursor-pointer relative overflow-hidden flex flex-col h-full opacity-80">
             <div className="h-1 bg-yellow-500 w-full absolute top-0" />
-            <div className="p-4 flex flex-col h-full">
+            <div className="p-5 flex flex-col h-full">
                 <div className="flex justify-between items-start mb-2">
-                    <span className="font-bold text-slate-900 text-lg">{displayId}</span>
+                    <span className="font-bold text-slate-900 text-xl">{displayId}</span>
                     <span className="px-2 py-0.5 rounded text-xs font-semibold bg-yellow-100 text-yellow-700">{status === 'cleaning' ? 'Cleaning' : 'Maintenance'}</span>
                 </div>
                 <div className="flex-1 flex flex-col items-center justify-center my-4 text-center">
@@ -91,33 +85,65 @@ function BedCard({ bed, onUpdate, onDischarge }) {
     // For occupied/critical beds, get patient info from bed_queue
     const q = bed.activeQueue;
 
+    // ── For occupied/critical: shared discharge info block ──────────────────
+    const pred = q?.latestPrediction;
+    const admitDate = fmt(q?.bed_assigned_at || q?.admitted_from_opd_at);
+    const dischargeDate = fmt(pred?.predicted_discharge_date);
+    const ct = countdown(pred?.predicted_discharge_date ? pred.predicted_discharge_date + 'T00:00:00' : null);
+    const confPct = pred?.confidence != null ? `${Math.round(pred.confidence * 100)}%` : null;
+
+    const DischargeInfo = ({ accent }) => (
+        <div className="mt-2 mb-1 grid grid-cols-3 gap-1.5 text-center">
+            <div className="bg-slate-50 rounded-lg p-1.5">
+                <p className="text-[9px] font-bold uppercase text-slate-400 mb-0.5">Admitted</p>
+                <p className="text-[11px] font-bold text-slate-700">{admitDate || '—'}</p>
+            </div>
+            <div className="bg-slate-50 rounded-lg p-1.5">
+                <p className="text-[9px] font-bold uppercase text-slate-400 mb-0.5">Predicted DC</p>
+                <p className="text-[11px] font-bold text-slate-700">{dischargeDate || '—'}</p>
+            </div>
+            <div className="bg-slate-50 rounded-lg p-1.5">
+                <p className="text-[9px] font-bold uppercase text-slate-400 mb-0.5">Remaining</p>
+                {ct ? (
+                    <p className={`text-[11px] font-bold ${ct.color}`}>{ct.label}</p>
+                ) : (
+                    <p className="text-[11px] font-bold text-slate-400">—</p>
+                )}
+            </div>
+        </div>
+    );
+
     if (status === 'critical' || (status === 'occupied' && isICU)) return (
         <div className="group bg-white rounded-xl border border-red-200 shadow-sm hover:shadow-md hover:border-red-400 transition-all cursor-pointer relative overflow-hidden flex flex-col h-full ring-2 ring-red-50">
             <div className="h-1 bg-red-500 w-full absolute top-0" />
-            <div className="p-4 flex flex-col h-full">
-                <div className="flex justify-between items-start mb-3">
-                    <span className="font-bold text-slate-900 text-lg">{displayId}</span>
+            <div className="p-5 flex flex-col h-full">
+                <div className="flex justify-between items-start mb-2">
+                    <span className="font-bold text-slate-900 text-xl">{displayId}</span>
                     <div className="px-2 py-0.5 rounded text-xs font-semibold bg-red-100 text-red-600 flex items-center gap-1">
                         <span className="material-symbols-outlined text-[14px]">{status === 'critical' ? 'priority_high' : 'monitor_heart'}</span>
                         {status === 'critical' ? 'Critical' : 'Occupied (ICU)'}
                     </div>
                 </div>
-                <h4 className="text-sm font-semibold text-slate-900">{q?.patient_name || '—'}</h4>
-                <p className="text-xs text-slate-500">
-                    {q?.disease && <span className="font-medium">{q.disease}</span>}
-                    {q?.bed_assigned_at && <span> • Adm: {timeAgo(q.bed_assigned_at)}</span>}
-                </p>
+                <h4 className="text-base font-semibold text-slate-900">{q?.patient_name || '—'}</h4>
+                {q?.disease && <p className="text-xs text-slate-500 font-medium">{q.disease}</p>}
+                <DischargeInfo accent="red" />
                 <div className="mt-auto pt-3 border-t border-slate-100 flex items-center justify-between">
                     <div className="flex items-center gap-1 text-xs text-red-600 font-medium">
                         <span className="material-symbols-outlined text-sm">monitor_heart</span>
-                        <span>{status === 'critical' ? 'Critical Monitoring' : 'ICU Monitoring'}</span>
+                        <span>{status === 'critical' ? 'Critical' : 'ICU'}</span>
                     </div>
                     <div className="flex items-center gap-2">
                         <button
                             onClick={(e) => { e.stopPropagation(); onDischarge(bedId); }}
                             className="text-[10px] font-bold uppercase tracking-wider bg-red-50 text-red-600 px-2 py-1 rounded hover:bg-red-600 hover:text-white transition-colors border border-red-100"
                         >Discharge</button>
-                        <button className="text-slate-400 hover:text-[#2b8cee] transition-colors"><span className="material-symbols-outlined">more_vert</span></button>
+                        <button
+                            onClick={(e) => { e.stopPropagation(); onUpdateRound(bed); }}
+                            className="text-[10px] font-bold uppercase tracking-wider bg-red-600 text-white px-2 py-1 rounded hover:bg-red-700 transition-colors border border-red-100 flex items-center gap-1"
+                        >
+                            <span className="material-symbols-outlined text-xs">edit_note</span>
+                            Round
+                        </button>
                     </div>
                 </div>
             </div>
@@ -128,32 +154,30 @@ function BedCard({ bed, onUpdate, onDischarge }) {
     return (
         <div className="group bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md hover:border-[#2b8cee]/50 transition-all cursor-pointer relative overflow-hidden flex flex-col h-full">
             <div className="h-1 bg-[#2b8cee] w-full absolute top-0" />
-            <div className="p-4 flex flex-col h-full">
-                <div className="flex justify-between items-start mb-3">
-                    <span className="font-bold text-slate-900 text-lg">{displayId}</span>
+            <div className="p-5 flex flex-col h-full">
+                <div className="flex justify-between items-start mb-2">
+                    <span className="font-bold text-slate-900 text-xl">{displayId}</span>
                     <div className="px-2 py-0.5 rounded text-xs font-semibold bg-[#2b8cee]/10 text-[#2b8cee] flex items-center gap-1">
                         <span className="size-1.5 rounded-full bg-[#2b8cee] animate-pulse inline-block" />
                         Occupied{isGeneral ? ' (General)' : ''}
                     </div>
                 </div>
-                <h4 className="text-sm font-semibold text-slate-900">{q?.patient_name || '—'}</h4>
-                <p className="text-xs text-slate-500">
-                    {q?.disease && <span className="font-medium">{q.disease}</span>}
-                    {q?.bed_assigned_at && <span> • Adm: {timeAgo(q.bed_assigned_at)}</span>}
-                </p>
-                {notes && <p className="text-xs font-medium text-slate-700 mt-2 bg-slate-50 p-1.5 rounded inline-block">Note: {notes}</p>}
-                <div className="mt-auto pt-3 border-t border-slate-100 flex items-center justify-between">
-                    <div className="flex items-center gap-1 text-xs text-slate-500">
-                        <span className="material-symbols-outlined text-sm">schedule</span>
-                        <span>~1d left</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                        <button
-                            onClick={(e) => { e.stopPropagation(); onDischarge(bedId); }}
-                            className="text-[10px] font-bold uppercase tracking-wider bg-blue-50 text-[#2b8cee] px-2 py-1 rounded hover:bg-[#2b8cee] hover:text-white transition-colors border border-[#2b8cee]/20"
-                        >Discharge</button>
-                        <button className="text-slate-400 hover:text-[#2b8cee] transition-colors"><span className="material-symbols-outlined">more_vert</span></button>
-                    </div>
+                <h4 className="text-base font-semibold text-slate-900">{q?.patient_name || '—'}</h4>
+                {q?.disease && <p className="text-xs text-slate-500 font-medium">{q.disease}</p>}
+                <DischargeInfo accent="blue" />
+                {notes && <p className="text-xs font-medium text-slate-700 bg-slate-50 p-1.5 rounded">Note: {notes}</p>}
+                <div className="mt-auto pt-2 border-t border-slate-100 flex items-center justify-end gap-2">
+                    <button
+                        onClick={(e) => { e.stopPropagation(); onDischarge(bedId); }}
+                        className="text-[10px] font-bold uppercase tracking-wider bg-blue-50 text-[#2b8cee] px-2 py-1 rounded hover:bg-[#2b8cee] hover:text-white transition-colors border border-[#2b8cee]/20"
+                    >Discharge</button>
+                    <button
+                        onClick={(e) => { e.stopPropagation(); onUpdateRound(bed); }}
+                        className="text-[10px] font-bold uppercase tracking-wider bg-[#2b8cee] text-white px-2 py-1 rounded hover:bg-blue-600 transition-colors border border-blue-100 flex items-center gap-1"
+                    >
+                        <span className="material-symbols-outlined text-xs">edit_note</span>
+                        Round
+                    </button>
                 </div>
             </div>
         </div>
@@ -299,27 +323,43 @@ export default function BedManagement() {
     const [beds, setBeds] = useState([]);
     const [loading, setLoading] = useState(true);
     const [showAddBed, setShowAddBed] = useState(false);
+    const [showRoundModal, setShowRoundModal] = useState(false);
+    const [selectedBed, setSelectedBed] = useState(null);
 
     const fetchBeds = useCallback(async () => {
         setLoading(true);
         try {
-            // Join bed_queue to get patient info (OPD-admitted patients use text names, not patient_id)
             const { data, error } = await supabase
                 .from('beds')
                 .select(`
                     *,
-                    queue_entry:bed_queue(patient_name, disease, admitted_from_opd_at, bed_assigned_at, status)
+                    patient_id,
+                    queue_entry:bed_queue(
+                        id, patient_name, disease, phone, age,
+                        admitted_from_opd_at, bed_assigned_at, status,
+                        predictions:discharge_predictions(
+                            predicted_discharge_date, remaining_days, confidence, reasoning, created_at
+                        )
+                    )
                 `);
 
             if (error) throw error;
 
-            // Pick the active queue entry for each bed (bed_assigned or admitted)
-            const formatted = (data || []).map(bed => ({
-                ...bed,
-                activeQueue: bed.queue_entry?.find(
+            const formatted = (data || []).map(bed => {
+                const activeQ = bed.queue_entry?.find(
                     q => q.status === 'bed_assigned' || q.status === 'admitted'
-                ) || bed.queue_entry?.[0] || null
-            }));
+                ) || bed.queue_entry?.[0] || null;
+
+                // Attach the most recent prediction to the active queue entry
+                if (activeQ && activeQ.predictions?.length) {
+                    const sorted = [...activeQ.predictions].sort(
+                        (a, b) => new Date(b.created_at) - new Date(a.created_at)
+                    );
+                    activeQ.latestPrediction = sorted[0];
+                }
+
+                return { ...bed, activeQueue: activeQ };
+            });
 
             setBeds(formatted);
         } catch (err) {
@@ -404,6 +444,13 @@ export default function BedManagement() {
     return (
         <div className="flex flex-1 flex-col overflow-hidden">
             {showAddBed && <AddBedModal onClose={() => setShowAddBed(false)} onAdd={fetchBeds} />}
+            {showRoundModal && selectedBed && (
+                <DailyRoundModal
+                    bed={selectedBed}
+                    onClose={() => { setShowRoundModal(false); setSelectedBed(null); }}
+                    onUpdate={fetchBeds}
+                />
+            )}
 
             <header className="flex items-center justify-between border-b border-slate-200 bg-white px-6 py-3 shrink-0 shadow-sm">
                 <div className="flex items-center gap-4">
@@ -464,9 +511,15 @@ export default function BedManagement() {
                                 <p className="text-slate-500 mt-1">Try changing filters or add a new bed.</p>
                             </div>
                         ) : (
-                            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 xl:grid-cols-3 gap-6">
                                 {sortedBeds.map((bed) => (
-                                    <BedCard key={bed.bed_id || bed.id} bed={bed} onUpdate={handleUpdateBedStatus} onDischarge={handleDischarge} />
+                                    <BedCard
+                                        key={bed.bed_id || bed.id}
+                                        bed={bed}
+                                        onUpdate={handleUpdateBedStatus}
+                                        onDischarge={handleDischarge}
+                                        onUpdateRound={(b) => { setSelectedBed(b); setShowRoundModal(true); }}
+                                    />
                                 ))}
                             </div>
                         )}
