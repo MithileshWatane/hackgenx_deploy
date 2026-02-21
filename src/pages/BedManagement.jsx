@@ -4,10 +4,13 @@ import { supabase } from '../lib/supabase';
 // ── Bed Card ──────────────────────────────────────────────────────────────────
 
 function BedCard({ bed, onUpdate, onDischarge }) {
-    const { id, bed_number, status, patient, admission, notes } = bed;
+    const { bed_id, id, bed_number, status, patient, admission, notes } = bed;
+    
+    // Use bed_id if available, fallback to id
+    const bedId = bed_id || id;
 
     // Map database status to UI format
-    const displayId = bed_number || id.slice(0, 8);
+    const displayId = bed_number || bedId?.slice(0, 8);
 
     // Helpers for admission data
     const timeAgo = (isoString) => {
@@ -77,7 +80,7 @@ function BedCard({ bed, onUpdate, onDischarge }) {
                 </div>
                 <div className="pt-3 border-t border-slate-100">
                     <button
-                        onClick={() => onUpdate(id, 'available')}
+                        onClick={() => onUpdate(bedId, 'available')}
                         className="w-full py-1.5 rounded text-sm font-medium text-slate-600 border border-slate-200 hover:bg-green-500 hover:text-white hover:border-green-500 transition-colors"
                     >Mark as Ready</button>
                 </div>
@@ -111,7 +114,7 @@ function BedCard({ bed, onUpdate, onDischarge }) {
                     </div>
                     <div className="flex items-center gap-2">
                         <button
-                            onClick={(e) => { e.stopPropagation(); onDischarge(id); }}
+                            onClick={(e) => { e.stopPropagation(); onDischarge(bedId); }}
                             className="text-[10px] font-bold uppercase tracking-wider bg-red-50 text-red-600 px-2 py-1 rounded hover:bg-red-600 hover:text-white transition-colors border border-red-100"
                         >Discharge</button>
                         <button className="text-slate-400 hover:text-[#2b8cee] transition-colors"><span className="material-symbols-outlined">more_vert</span></button>
@@ -146,7 +149,7 @@ function BedCard({ bed, onUpdate, onDischarge }) {
                     </div>
                     <div className="flex items-center gap-2">
                         <button
-                            onClick={(e) => { e.stopPropagation(); onDischarge(id); }}
+                            onClick={(e) => { e.stopPropagation(); onDischarge(bedId); }}
                             className="text-[10px] font-bold uppercase tracking-wider bg-blue-50 text-[#2b8cee] px-2 py-1 rounded hover:bg-[#2b8cee] hover:text-white transition-colors border border-[#2b8cee]/20"
                         >Discharge</button>
                         <button className="text-slate-400 hover:text-[#2b8cee] transition-colors"><span className="material-symbols-outlined">more_vert</span></button>
@@ -335,7 +338,7 @@ export default function BedManagement() {
             const { error } = await supabase
                 .from('beds')
                 .update({ status: newStatus })
-                .eq('id', id);
+                .eq('bed_id', id);
             if (error) throw error;
             fetchBeds();
         } catch (err) {
@@ -351,7 +354,7 @@ export default function BedManagement() {
             const { error: bedError } = await supabase
                 .from('beds')
                 .update({ status: 'available' })
-                .eq('id', bedId);
+                .eq('bed_id', bedId);
 
             if (bedError) throw bedError;
 
@@ -463,7 +466,7 @@ export default function BedManagement() {
                         ) : (
                             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
                                 {sortedBeds.map((bed) => (
-                                    <BedCard key={bed.id} bed={bed} onUpdate={handleUpdateBedStatus} onDischarge={handleDischarge} />
+                                    <BedCard key={bed.bed_id || bed.id} bed={bed} onUpdate={handleUpdateBedStatus} onDischarge={handleDischarge} />
                                 ))}
                             </div>
                         )}
