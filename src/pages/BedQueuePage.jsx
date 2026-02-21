@@ -233,11 +233,21 @@ export default function BedQueuePage() {
             const updates = { status: newStatus };
             if (newStatus === 'admitted') updates.admitted_at = new Date().toISOString();
             if (newStatus === 'discharged') {
-                updates.discharged_at = new Date().toISOString();
-                // If discharged, we should also free up the bed if possible
-                // However, without bed_id in bed_queue, we might need to find it differently
-                // Actually, our migration added bed_id to bed_queue but the table didn't have it yet?
-                // Wait, BedQueuePage uses p.bed_id if available.
+                const now = new Date().toISOString();
+                updates.discharged_at = now;
+
+                // If discharged, we should also free up the bed
+                if (entry.bed_id) {
+                    const { error: bedError } = await supabase
+                        .from('beds')
+                        .update({ status: 'available' })
+                        .eq('id', entry.bed_id);
+
+                    if (bedError) {
+                        console.error('Error freeing bed on discharge:', bedError);
+                        // We continue with queue update even if bed update fails, but log it
+                    }
+                }
             }
 
             const { error: updateError } = await supabase
