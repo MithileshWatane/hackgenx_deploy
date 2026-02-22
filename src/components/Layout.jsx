@@ -3,7 +3,6 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext_simple';
 
 const navItems = [
-    { icon: 'dashboard', label: 'Queue Dashboard', path: '/dashboard' },
     { icon: 'queue', label: 'OPD Queue', path: '/dashboard' },
     { icon: 'bed', label: 'Bed Queue', path: '/bed-queue' },
     { icon: 'meeting_room', label: 'Bed Management', path: '/bed-management' },
