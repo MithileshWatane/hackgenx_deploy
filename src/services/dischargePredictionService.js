@@ -92,6 +92,24 @@ export async function runDischargePrediction(queueId, currentRoundId, bedQueueEn
 
             if (saveError) {
                 console.error('Failed to save discharge prediction:', saveError);
+            } else {
+                // ── Step 6: Sync predicted date back to the primary queue record ──
+                const queueTable = isICU ? 'icu_queue' : 'bed_queue';
+                const dateColumn = isICU ? 'discharge_time' : 'discharge_time';
+
+                // Note: We update discharge_time so it's reflected on the cards
+                const { error: syncError } = await supabase
+                    .from(queueTable)
+                    .update({
+                        [dateColumn]: prediction.predicted_discharge_date
+                            ? `${prediction.predicted_discharge_date}T12:00:00Z`
+                            : null
+                    })
+                    .eq('id', queueId);
+
+                if (syncError) {
+                    console.error(`Failed to sync discharge_time to ${queueTable}:`, syncError);
+                }
             }
         }
 
