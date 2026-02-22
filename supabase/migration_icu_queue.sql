@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS icu_queue (
   -- Tracking
   doctor_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
   original_bed_id UUID REFERENCES beds(bed_id) ON DELETE SET NULL,
-  status TEXT DEFAULT 'waiting' CHECK (status IN ('waiting', 'admitted', 'cancelled')),
+  status TEXT DEFAULT 'waiting' CHECK (status IN ('waiting', 'admitted', 'assigned', 'cancelled')),
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );

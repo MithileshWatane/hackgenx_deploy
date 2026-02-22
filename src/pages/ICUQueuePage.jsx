@@ -14,23 +14,74 @@ function timeAgo(isoString) {
     return `${h}h ${diffMin % 60}m ago`;
 }
 
+function timeSince(isoString) {
+    if (!isoString) return '—';
+    const diffMs = Date.now() - new Date(isoString).getTime();
+    const diffMin = Math.floor(diffMs / 60000);
+    if (diffMin < 1) return '<1 min';
+    if (diffMin < 60) return `${diffMin} min`;
+    const h = Math.floor(diffMin / 60);
+    return `${h}h ${diffMin % 60}m`;
+}
+
+function formatDate(isoString) {
+    if (!isoString) return '—';
+    return new Date(isoString).toLocaleDateString('en-IN', {
+        day: '2-digit', month: 'short', year: 'numeric'
+    });
+}
+
+function SeverityBadge({ severity }) {
+    const cls = {
+        critical: 'bg-red-100 text-red-700 border-red-200',
+        severe: 'bg-orange-100 text-orange-700 border-orange-200',
+        moderate: 'bg-yellow-100 text-yellow-700 border-yellow-200',
+    }[severity] || 'bg-slate-100 text-slate-600 border-slate-200';
+    return <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase border ${cls}`}>{severity}</span>;
+}
+
+const STATUS_COLORS = {
+    waiting: 'bg-amber-100 text-amber-800 border-amber-200',
+    assigned: 'bg-green-100 text-green-800 border-green-200',
+    cancelled: 'bg-slate-100 text-slate-500 border-slate-200',
+};
+
+const STATUS_LABEL = {
+    waiting: 'Waiting',
+    assigned: 'Assigned',
+    cancelled: 'Cancelled',
+};
+
 function StatusBadge({ status }) {
-    const map = {
-        waiting: 'bg-amber-100 text-amber-800',
-        admitted: 'bg-green-100 text-green-800',
-        cancelled: 'bg-slate-100 text-slate-600',
-    };
-    const label = {
-        waiting: 'Waiting',
-        admitted: 'Admitted',
-        cancelled: 'Cancelled',
-    };
     return (
-        <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold ${map[status] || 'bg-slate-100'}`}>
-            {label[status] || status}
+        <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold border ${STATUS_COLORS[status] || 'bg-slate-100 text-slate-600'}`}>
+            {STATUS_LABEL[status] || status}
         </span>
     );
 }
+
+// ── Scheduling algorithm (same as icuScheduler.js) ────────────────────────────
+
+const findBestBed = (availableBeds, patient) => {
+    let bestBed = null;
+    let bestScore = -1;
+
+    for (const bed of availableBeds) {
+        const ventilatorOk = !patient.ventilator_needed || bed.ventilator_available;
+        const dialysisOk = !patient.dialysis_needed || bed.dialysis_available;
+        if (!ventilatorOk || !dialysisOk) continue;
+
+        let score = 0;
+        if (bed.ventilator_available === patient.ventilator_needed) score += 1;
+        if (bed.dialysis_available === patient.dialysis_needed) score += 1;
+
+        if (score > bestScore) {
+            bestScore = score;
+            bestBed = bed;
+        }
+    }
+    return bestBed;
+};
 
 // ── Main Component ─────────────────────────────────────────────────────────────
 
@@ -39,6 +90,7 @@ export default function ICUQueuePage() {
     const [queue, setQueue] = useState([]);
     const [loading, setLoading] = useState(true);
     const [search, setSearch] = useState('');
+    const [activeFilter, setActiveFilter] = useState('all'); // 'all' | 'waiting' | 'assigned'
     const [updatingId, setUpdatingId] = useState(null);
 
     const fetchQueue = useCallback(async () => {
@@ -48,7 +100,7 @@ export default function ICUQueuePage() {
             const { data, error } = await supabase
                 .from('icu_queue')
                 .select('*')
-                .eq('status', 'waiting')
+                .in('status', ['waiting', 'assigned', 'cancelled'])
                 .order('time', { ascending: true });
 
             if (error) throw error;
@@ -66,114 +118,241 @@ export default function ICUQueuePage() {
         return () => clearInterval(interval);
     }, [fetchQueue]);
 
-    const handleAction = async (id, newStatus) => {
-        if (!window.confirm(`Are you sure you want to ${newStatus === 'admitted' ? 'admit' : 'cancel'} this request?`)) return;
-        setUpdatingId(id);
+    const handleManualAssign = async (patient) => {
+        if (!window.confirm(`Assign an ICU bed to ${patient.patient_name}?`)) return;
+        setUpdatingId(patient.id);
         try {
-            const { error } = await supabase
-                .from('icu_queue')
-                .update({ status: newStatus })
-                .eq('id', id);
+            const { data: availableBeds, error: bedError } = await supabase
+                .from('icu_beds')
+                .select('*')
+                .eq('is_available', true);
 
-            if (error) throw error;
+            if (bedError) throw bedError;
+
+            const bestBed = findBestBed(availableBeds || [], patient);
+
+            if (!bestBed) {
+                alert('No compatible ICU bed available right now.\nPatient will remain in the waiting queue.');
+                return;
+            }
+
+            const admissionTime = new Date();
+            const dischargeTime = new Date(admissionTime);
+            dischargeTime.setDate(dischargeTime.getDate() + (patient.predicted_stay_days || 7));
+
+            const { error: bedUpdateError } = await supabase.from('icu_beds').update({ is_available: false }).eq('id', bestBed.id);
+            if (bedUpdateError) throw bedUpdateError;
+
+            const { error: queueUpdateError } = await supabase.from('icu_queue').update({
+                status: 'assigned',
+                assigned_bed_id: bestBed.id,
+                assigned_bed_label: bestBed.bed_id,
+                admission_time: admissionTime.toISOString(),
+                discharge_time: dischargeTime.toISOString(),
+            }).eq('id', patient.id);
+            if (queueUpdateError) throw queueUpdateError;
+
+            alert(`✅ ${patient.patient_name} assigned to ICU Bed ${bestBed.bed_id}!`);
             fetchQueue();
         } catch (err) {
-            console.error('Update ICU queue error:', err);
+            console.error('Assign error:', err);
             alert('Error: ' + err.message);
         } finally {
             setUpdatingId(null);
         }
     };
 
-    const filtered = queue.filter(p =>
-        p.patient_name.toLowerCase().includes(search.toLowerCase()) ||
-        p.patient_token.toLowerCase().includes(search.toLowerCase()) ||
-        p.diseases.toLowerCase().includes(search.toLowerCase())
-    );
+    const handleCancel = async (id) => {
+        if (!window.confirm('Cancel this ICU request?')) return;
+        setUpdatingId(id);
+        try {
+            const { error } = await supabase.from('icu_queue').update({ status: 'cancelled' }).eq('id', id);
+            if (error) throw error;
+            fetchQueue();
+        } catch (err) {
+            alert('Error: ' + err.message);
+        } finally {
+            setUpdatingId(null);
+        }
+    };
+
+    const stats = {
+        waiting: queue.filter(p => p.status === 'waiting').length,
+        assigned: queue.filter(p => p.status === 'assigned').length,
+    };
+
+    const filtered = queue.filter(p => {
+        if (activeFilter !== 'all' && p.status !== activeFilter) return false;
+        const q = search.toLowerCase();
+        return (
+            p.patient_name?.toLowerCase().includes(q) ||
+            p.patient_token?.toLowerCase().includes(q) ||
+            p.diseases?.toLowerCase().includes(q)
+        );
+    });
+
+    const FILTERS = [
+        { key: 'all', label: 'All Requests', count: queue.length },
+        { key: 'waiting', label: 'Waiting', count: stats.waiting },
+        { key: 'assigned', label: 'Assigned', count: stats.assigned },
+        { key: 'cancelled', label: 'Cancelled', count: null },
+    ];
 
     return (
         <div className="flex flex-1 flex-col overflow-hidden bg-[#f6f7f8]">
             <header className="flex h-16 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-6">
                 <div>
-                    <h1 className="text-xl font-bold text-slate-900">ICU Admission Queue</h1>
-                    <p className="text-xs text-slate-500">Critical care transfer requests</p>
+                    <h1 className="text-xl font-bold text-slate-900">ICU Bed Queue</h1>
+                    <p className="text-xs text-slate-500">Critical Care Transfer Requests — Auto-Assignment Enabled</p>
                 </div>
                 <div className="flex items-center gap-3">
                     <div className="hidden md:flex items-center rounded-lg bg-slate-100 px-3 py-2">
                         <span className="material-symbols-outlined text-slate-400">search</span>
                         <input
                             className="ml-2 w-48 bg-transparent text-sm font-medium text-slate-900 placeholder-slate-400 focus:outline-none"
-                            placeholder="Search patients..."
+                            placeholder="Search name or token..."
                             value={search}
                             onChange={(e) => setSearch(e.target.value)}
                         />
                     </div>
-                    <button onClick={fetchQueue} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 transition-colors">
+                    <button onClick={fetchQueue} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 hover:text-red-500 transition-colors">
                         <span className="material-symbols-outlined">refresh</span>
                     </button>
                 </div>
             </header>
 
             <div className="flex-1 overflow-y-auto p-6">
+                {/* Stats Cards */}
+                <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2">
+                    {[
+                        { label: 'Waiting', count: stats.waiting, icon: 'hourglass_empty', iconBg: 'bg-amber-100', iconColor: 'text-amber-600' },
+                        { label: 'Assigned', count: stats.assigned, icon: 'check_circle', iconBg: 'bg-green-100', iconColor: 'text-green-600' },
+                    ].map((s) => (
+                        <div key={s.label} className="flex items-center gap-4 rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+                            <div className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full ${s.iconBg} ${s.iconColor}`}>
+                                <span className="material-symbols-outlined">{s.icon}</span>
+                            </div>
+                            <div>
+                                <p className="text-2xl font-bold text-slate-900">{s.count}</p>
+                                <p className="text-sm font-semibold text-slate-700">{s.label}</p>
+                            </div>
+                        </div>
+                    ))}
+                </div>
+
+                {/* Filter Tabs */}
+                <div className="mb-4 flex items-center gap-2 overflow-x-auto">
+                    {FILTERS.map((f) => (
+                        <button
+                            key={f.key}
+                            onClick={() => setActiveFilter(f.key)}
+                            className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-colors ${activeFilter === f.key ? 'bg-red-600 text-white shadow-sm' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'}`}
+                        >
+                            {f.label}
+                            {f.count !== null && <span className={`rounded-full px-2 py-0.5 text-xs font-bold ${activeFilter === f.key ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-600'}`}>{f.count}</span>}
+                        </button>
+                    ))}
+                </div>
+
                 <div className="rounded-xl border border-slate-200 bg-white shadow-sm overflow-hidden">
-                    {loading ? (
+                    <div className="bg-slate-50 px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-gradient-to-r from-red-50/50 to-transparent">
+                        <h2 className="font-bold text-slate-800">ICU Request List</h2>
+                        <span className="text-xs text-slate-500 font-medium tracking-wide uppercase">{filtered.length} Requests</span>
+                    </div>
+
+                    {loading && queue.length === 0 ? (
                         <div className="flex items-center justify-center py-20">
-                            <div className="animate-spin w-10 h-10 border-4 border-slate-200 border-t-red-500 rounded-full"></div>
+                            <span className="material-symbols-outlined animate-spin text-slate-300 text-4xl">progress_activity</span>
                         </div>
                     ) : filtered.length === 0 ? (
                         <div className="py-20 text-center">
                             <span className="material-symbols-outlined text-6xl text-slate-300 block mb-4">monitor_heart</span>
-                            <p className="text-slate-500 text-lg font-medium">No pending ICU requests</p>
+                            <p className="text-slate-500 text-lg font-medium">No ICU requests found</p>
                         </div>
                     ) : (
                         <div className="overflow-x-auto">
-                            <table className="w-full text-left text-sm">
-                                <thead className="bg-slate-50 text-xs uppercase text-slate-500">
+                            <table className="w-full text-left text-sm text-slate-600">
+                                <thead className="bg-slate-50/50 text-xs uppercase text-slate-500 font-bold tracking-wider">
                                     <tr>
-                                        <th className="px-5 py-3 font-semibold">Token</th>
-                                        <th className="px-5 py-3 font-semibold">Patient</th>
-                                        <th className="px-5 py-3 font-semibold">Diagnosis/Surgery</th>
-                                        <th className="px-5 py-3 font-semibold">Needs</th>
-                                        <th className="px-5 py-3 font-semibold">Severity</th>
-                                        <th className="px-5 py-3 font-semibold">Requested At</th>
-                                        <th className="px-5 py-3 font-semibold text-right">Actions</th>
+                                        <th className="px-5 py-4">Patient</th>
+                                        <th className="px-5 py-4">Diagnosis/Surgery</th>
+                                        <th className="px-5 py-4">Needs/Severity</th>
+                                        <th className="px-5 py-4">Wait Time</th>
+                                        <th className="px-5 py-4 text-center">Status / Bed</th>
+                                        <th className="px-5 py-4 text-right">Actions</th>
                                     </tr>
                                 </thead>
                                 <tbody className="divide-y divide-slate-100">
                                     {filtered.map((p) => (
-                                        <tr key={p.id} className="hover:bg-slate-50 transition-colors">
+                                        <tr key={p.id} className={`hover:bg-slate-50 transition-colors ${p.status === 'assigned' ? 'bg-green-50/20' : ''}`}>
                                             <td className="px-5 py-4">
-                                                <span className="font-mono text-xs font-bold text-red-600 bg-red-50 px-2 py-1 rounded">
-                                                    {p.patient_token}
-                                                </span>
+                                                <div className="font-bold text-slate-900">{p.patient_name}</div>
+                                                <div className="font-mono text-[10px] text-red-600 bg-red-50 px-1.5 py-0.5 rounded w-fit mt-1">{p.patient_token || p.id.slice(0, 8)}</div>
                                             </td>
-                                            <td className="px-5 py-4 font-semibold text-slate-900">{p.patient_name}</td>
                                             <td className="px-5 py-4">
                                                 <p className="text-slate-900 font-medium">{p.diseases}</p>
-                                                {p.surgery_type && <p className="text-[10px] text-slate-500 italic">{p.surgery_type}</p>}
+                                                {p.surgery_type && <p className="text-[10px] text-slate-500 italic mt-0.5">{p.surgery_type}</p>}
                                             </td>
                                             <td className="px-5 py-4">
-                                                <div className="flex flex-wrap gap-1">
-                                                    {p.ventilator_needed && <span className="text-[10px] bg-red-500 text-white px-1.5 py-0.5 rounded font-bold">Ventilator</span>}
-                                                    {p.dialysis_needed && <span className="text-[10px] bg-purple-500 text-white px-1.5 py-0.5 rounded font-bold">Dialysis</span>}
-                                                    {p.is_emergency && <span className="text-[10px] bg-orange-500 text-white px-1.5 py-0.5 rounded font-bold">Emergency</span>}
+                                                <div className="flex flex-col gap-1.5">
+                                                    <div className="flex flex-wrap gap-1">
+                                                        {p.ventilator_needed && <span className="text-[10px] bg-red-500 text-white px-1.5 py-0.5 rounded font-bold uppercase">Vent</span>}
+                                                        {p.dialysis_needed && <span className="text-[10px] bg-purple-500 text-white px-1.5 py-0.5 rounded font-bold uppercase">Dial</span>}
+                                                        {p.is_emergency && <span className="text-[10px] bg-orange-500 text-white px-1.5 py-0.5 rounded font-bold uppercase">🚨 ER</span>}
+                                                    </div>
+                                                    <SeverityBadge severity={p.severity} />
                                                 </div>
                                             </td>
                                             <td className="px-5 py-4">
-                                                <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${p.severity === 'critical' ? 'bg-red-100 text-red-700' : 'bg-orange-100 text-orange-700'}`}>
-                                                    {p.severity}
-                                                </span>
+                                                <div className="text-xs font-bold text-slate-700">{timeSince(p.time)}</div>
+                                                <div className="text-[10px] text-slate-400">{timeAgo(p.time)}</div>
                                             </td>
-                                            <td className="px-5 py-4 text-xs text-slate-500">{timeAgo(p.time)}</td>
+                                            <td className="px-5 py-4">
+                                                <div className="flex flex-col items-center gap-1.5">
+                                                    <StatusBadge status={p.status} />
+                                                    {p.status === 'assigned' && p.assigned_bed_label && (
+                                                        <div className="flex items-center gap-1 bg-red-50 px-2 py-0.5 rounded border border-red-100">
+                                                            <span className="material-symbols-outlined text-[14px] text-red-600">bed</span>
+                                                            <span className="text-xs font-bold text-red-600">{p.assigned_bed_label}</span>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            </td>
                                             <td className="px-5 py-4 text-right">
                                                 <div className="flex items-center justify-end gap-2">
-                                                    <button onClick={() => handleAction(p.id, 'cancelled')} disabled={updatingId === p.id} className="p-1 text-slate-400 hover:text-slate-600">
-                                                        <span className="material-symbols-outlined text-xl">block</span>
-                                                    </button>
-                                                    <button onClick={() => handleAction(p.id, 'admitted')} disabled={updatingId === p.id} className="flex items-center gap-1 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-bold px-3 py-1.5 shadow-sm transition-all">
-                                                        {updatingId === p.id ? <span className="material-symbols-outlined animate-spin text-[16px]">progress_activity</span> : <span className="material-symbols-outlined text-[16px]">check_circle</span>}
-                                                        Admit
-                                                    </button>
+                                                    {p.status === 'waiting' && (
+                                                        <>
+                                                            <button
+                                                                onClick={() => handleCancel(p.id)}
+                                                                disabled={updatingId === p.id}
+                                                                className="p-1 text-slate-400 hover:text-red-500 transition-all hover:scale-110"
+                                                                title="Cancel request"
+                                                            >
+                                                                <span className="material-symbols-outlined text-xl">block</span>
+                                                            </button>
+                                                            <button
+                                                                onClick={() => handleManualAssign(p)}
+                                                                disabled={updatingId === p.id}
+                                                                className="bg-red-600 text-white px-4 py-1.5 rounded-lg text-xs font-bold hover:bg-red-700 transition-colors shadow-sm flex items-center gap-1.5 disabled:opacity-50"
+                                                            >
+                                                                {updatingId === p.id ? (
+                                                                    <span className="material-symbols-outlined animate-spin text-sm">progress_activity</span>
+                                                                ) : (
+                                                                    <span className="material-symbols-outlined text-sm">check_circle</span>
+                                                                )}
+                                                                Assign Bed
+                                                            </button>
+                                                        </>
+                                                    )}
+                                                    {p.status === 'assigned' && (
+                                                        <div className="flex flex-col items-end">
+                                                            <span className="text-xs text-green-600 font-bold flex items-center gap-1">
+                                                                <span className="material-symbols-outlined text-[14px]">check_circle</span>
+                                                                Assigned
+                                                            </span>
+                                                            <span className="text-[10px] text-slate-400 mt-1">Est. discharge: {formatDate(p.discharge_time)}</span>
+                                                        </div>
+                                                    )}
                                                 </div>
                                             </td>
                                         </tr>

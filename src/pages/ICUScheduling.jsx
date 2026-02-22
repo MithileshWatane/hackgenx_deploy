@@ -7,14 +7,14 @@ import {
   addICUBed,
   updateICUBed,
   deleteICUBed,
-  getBedStats,
 } from "../services/bedService";
+import { supabase } from "../lib/supabase";
 
 export default function ICUScheduling() {
   const [loadingType, setLoadingType] = useState(null); // "optimized" | null
   const [error, setError] = useState("");
   const [optimizedResult, setOptimizedResult] = useState(null);
-  
+
   const [beds, setBeds] = useState([]);
   const [bedStats, setBedStats] = useState(null);
   const [showAddBedForm, setShowAddBedForm] = useState(false);
@@ -45,14 +45,36 @@ export default function ICUScheduling() {
   // Load beds data
   const loadBedsData = async () => {
     try {
-      const [bedsData, statsData] = await Promise.all([
+      const [bedsData, { data: queueData, error: queueError }] = await Promise.all([
         getICUBeds(),
-        getBedStats(),
+        supabase.from('icu_queue').select('*').in('status', ['assigned'])
       ]);
-      setBeds(bedsData);
-      setBedStats(statsData);
+
+      if (queueError) throw queueError;
+
+      // Map queue data to beds — compare as strings to handle UUID vs integer mismatches
+      const formattedBeds = bedsData.map(bed => ({
+        ...bed,
+        activeQueue: queueData.find(q =>
+          String(q.assigned_bed_id) === String(bed.id) ||
+          String(q.assigned_bed_label).toUpperCase() === String(bed.bed_id).toUpperCase()
+        ) || null
+      }));
+
+      setBeds(formattedBeds);
+
+      // Calculate stats locally
+      const stats = {
+        total: formattedBeds.length,
+        available: formattedBeds.filter(b => b.is_available).length,
+        occupied: formattedBeds.filter(b => !b.is_available).length,
+        withVentilator: formattedBeds.filter(b => b.ventilator_available).length,
+        withDialysis: formattedBeds.filter(b => b.dialysis_available).length,
+      };
+      setBedStats(stats);
     } catch (err) {
       console.error("Error loading beds:", err);
+      setError("Failed to load ICU bed data");
     }
   };
 
@@ -198,7 +220,7 @@ export default function ICUScheduling() {
           </div>
           <div className="rounded-xl bg-slate-50 px-3 py-2">
             <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">
-              Admitted
+              Assigned
             </p>
             <p className="text-base font-bold text-slate-900">
               {admittedPatients ?? "—"}
@@ -206,6 +228,99 @@ export default function ICUScheduling() {
                 patients
               </span>
             </p>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const ICUBedCard = ({ bed, onEdit, onDelete }) => {
+    const q = bed.activeQueue;
+    const isAvailable = bed.is_available;
+
+    const fmt = (iso) => {
+      if (!iso) return null;
+      const d = new Date(iso);
+      return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: '2-digit' });
+    };
+
+    const countdown = (dischargeIso) => {
+      if (!dischargeIso) return null;
+      const diffMs = new Date(dischargeIso).getTime() - Date.now();
+      if (diffMs <= 0) return { label: 'Overdue', color: 'text-red-500' };
+      const days = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+      return {
+        label: `${days}d left`,
+        color: days <= 1 ? 'text-amber-500' : 'text-emerald-600'
+      };
+    };
+
+    const admitDate = fmt(q?.admission_time || q?.time);
+    const dischargeDate = fmt(q?.discharge_time);
+    const ct = countdown(q?.discharge_time);
+
+    if (isAvailable) {
+      return (
+        <div className="group bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md hover:border-green-500/50 transition-all cursor-pointer relative overflow-hidden flex flex-col h-full">
+          <div className="h-1 bg-green-500 w-full absolute top-0" />
+          <div className="p-5 flex flex-col h-full justify-between">
+            <div className="flex justify-between items-start">
+              <span className="font-bold text-slate-900 text-xl">{bed.bed_id}</span>
+              <span className="px-2 py-0.5 rounded text-xs font-semibold bg-green-100 text-green-700">Available</span>
+            </div>
+            <div className="flex-1 flex flex-col gap-2 my-4">
+              <div className="flex items-center justify-between text-xs text-slate-500">
+                <span>Type: {bed.bed_type}</span>
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {bed.ventilator_available && <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded text-[10px] font-bold">VENT</span>}
+                {bed.dialysis_available && <span className="px-1.5 py-0.5 bg-purple-50 text-purple-600 rounded text-[10px] font-bold">DIAL</span>}
+              </div>
+            </div>
+            <div className="pt-3 border-t border-slate-100 flex gap-2">
+              <button onClick={() => onEdit(bed)} className="flex-1 py-1.5 rounded text-[11px] font-bold uppercase text-blue-600 border border-blue-100 hover:bg-blue-50 transition-colors">Edit</button>
+              <button onClick={() => onDelete(bed.id)} className="flex-1 py-1.5 rounded text-[11px] font-bold uppercase text-red-600 border border-red-100 hover:bg-red-50 transition-colors">Delete</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // Occupied ICU Card
+    return (
+      <div className="group bg-white rounded-xl border border-red-200 shadow-sm hover:shadow-md hover:border-red-400 transition-all cursor-pointer relative overflow-hidden flex flex-col h-full ring-2 ring-red-50">
+        <div className="h-1 bg-red-500 w-full absolute top-0" />
+        <div className="p-5 flex flex-col h-full">
+          <div className="flex justify-between items-start mb-2">
+            <span className="font-bold text-slate-900 text-xl">{bed.bed_id}</span>
+            <div className="px-2 py-0.5 rounded text-xs font-semibold bg-red-100 text-red-600 flex items-center gap-1">
+              <span className="material-symbols-outlined text-[14px]">monitor_heart</span>
+              Occupied (ICU)
+            </div>
+          </div>
+          <h4 className="text-base font-semibold text-slate-900 truncate">{q?.patient_name || '—'}</h4>
+          <p className="text-xs text-slate-500 font-medium truncate mb-2">{q?.diseases || 'General ICU Care'}</p>
+
+          <div className="mt-2 mb-1 grid grid-cols-3 gap-1.5 text-center">
+            <div className="bg-slate-50 rounded-lg p-1.5">
+              <p className="text-[9px] font-bold uppercase text-slate-400 mb-0.5">Assigned On</p>
+              <p className="text-[11px] font-bold text-slate-700">{admitDate || '—'}</p>
+            </div>
+            <div className="bg-slate-50 rounded-lg p-1.5">
+              <p className="text-[9px] font-bold uppercase text-slate-400 mb-0.5">Est. DC</p>
+              <p className="text-[11px] font-bold text-slate-700">{dischargeDate || '—'}</p>
+            </div>
+            <div className="bg-slate-50 rounded-lg p-1.5">
+              <p className="text-[9px] font-bold uppercase text-slate-400 mb-0.5">Remaining</p>
+              <p className={`text-[11px] font-bold ${ct?.color || 'text-slate-400'}`}>{ct?.label || '—'}</p>
+            </div>
+          </div>
+
+          <div className="mt-auto pt-3 border-t border-slate-100 flex items-center justify-between">
+            <div className="flex items-center gap-1 text-xs text-red-600 font-medium">
+              <span className="material-symbols-outlined text-sm">monitor_heart</span>
+              <span className="uppercase tracking-wider">ICU - Occupied</span>
+            </div>
           </div>
         </div>
       </div>
@@ -345,191 +460,144 @@ export default function ICUScheduling() {
 
         {/* Bed Management Content */}
         <>
-            {/* Bed Statistics */}
-            {bedStats && (
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
-                <div className="bg-white rounded-xl border border-slate-200 p-4">
-                  <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Total Beds</p>
-                  <p className="text-2xl font-bold text-slate-900">{bedStats.total}</p>
-                </div>
-                <div className="bg-white rounded-xl border border-slate-200 p-4">
-                  <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Available</p>
-                  <p className="text-2xl font-bold text-green-600">{bedStats.available}</p>
-                </div>
-                <div className="bg-white rounded-xl border border-slate-200 p-4">
-                  <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Occupied</p>
-                  <p className="text-2xl font-bold text-red-600">{bedStats.occupied}</p>
-                </div>
-                <div className="bg-white rounded-xl border border-slate-200 p-4">
-                  <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Ventilator</p>
-                  <p className="text-2xl font-bold text-blue-600">{bedStats.withVentilator}</p>
-                </div>
-                <div className="bg-white rounded-xl border border-slate-200 p-4">
-                  <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Dialysis</p>
-                  <p className="text-2xl font-bold text-purple-600">{bedStats.withDialysis}</p>
-                </div>
+          {/* Bed Statistics */}
+          {bedStats && (
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+              <div className="bg-white rounded-xl border border-slate-200 p-4">
+                <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Total Beds</p>
+                <p className="text-2xl font-bold text-slate-900">{bedStats.total}</p>
               </div>
-            )}
-
-            {/* Add/Edit Bed Modal */}
-            {showAddBedForm && (
-              <div className="fixed inset-0 bg-slate-900/20 backdrop-blur-sm flex items-center justify-center z-50">
-                <div className="bg-white rounded-2xl shadow-xl max-w-md w-full mx-4 max-h-[90vh] overflow-y-auto">
-                  <div className="p-6 border-b border-slate-200">
-                    <div className="flex items-center justify-between">
-                      <h3 className="text-lg font-bold text-slate-900">
-                        {editingBed ? "Edit Bed" : "Add New Bed"}
-                      </h3>
-                      <button
-                        onClick={cancelBedForm}
-                        className="text-slate-400 hover:text-slate-600 transition-colors"
-                      >
-                        <span className="material-symbols-outlined text-2xl">close</span>
-                      </button>
-                    </div>
-                  </div>
-                  <div className="p-6">
-                    <div className="space-y-4">
-                      <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-1">Bed ID</label>
-                        <input
-                          type="text"
-                          value={bedForm.bed_id}
-                          onChange={(e) => setBedForm({ ...bedForm, bed_id: e.target.value })}
-                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          placeholder="e.g., B001"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-sm font-medium text-slate-700 mb-1">Bed Type</label>
-                        <select
-                          value={bedForm.bed_type}
-                          onChange={(e) => setBedForm({ ...bedForm, bed_type: e.target.value })}
-                          className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        >
-                          <option value="Basic">Basic</option>
-                          <option value="Advanced">Advanced</option>
-                          <option value="Critical">Critical</option>
-                        </select>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          id="ventilator"
-                          checked={bedForm.ventilator_available}
-                          onChange={(e) => setBedForm({ ...bedForm, ventilator_available: e.target.checked })}
-                          className="w-4 h-4 text-blue-600 border-slate-300 rounded focus:ring-blue-500"
-                        />
-                        <label htmlFor="ventilator" className="text-sm font-medium text-slate-700">
-                          Ventilator Available
-                        </label>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          id="dialysis"
-                          checked={bedForm.dialysis_available}
-                          onChange={(e) => setBedForm({ ...bedForm, dialysis_available: e.target.checked })}
-                          className="w-4 h-4 text-blue-600 border-slate-300 rounded focus:ring-blue-500"
-                        />
-                        <label htmlFor="dialysis" className="text-sm font-medium text-slate-700">
-                          Dialysis Available
-                        </label>
-                      </div>
-                    </div>
-                    <div className="flex gap-3 mt-6">
-                      <button
-                        onClick={editingBed ? handleUpdateBed : handleAddBed}
-                        disabled={bedFormLoading || !bedForm.bed_id}
-                        className="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-slate-300 text-white font-medium rounded-lg transition-colors"
-                      >
-                        {bedFormLoading ? "Saving..." : editingBed ? "Update Bed" : "Add Bed"}
-                      </button>
-                      <button
-                        onClick={cancelBedForm}
-                        className="flex-1 px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 font-medium rounded-lg transition-colors"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                </div>
+              <div className="bg-white rounded-xl border border-slate-200 p-4">
+                <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Available</p>
+                <p className="text-2xl font-bold text-green-600">{bedStats.available}</p>
               </div>
-            )}
-
-            {/* Beds List */}
-            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm">
-              <div className="p-5 border-b border-slate-200">
-                <h3 className="text-lg font-bold text-slate-900">ICU Beds ({beds.length})</h3>
+              <div className="bg-white rounded-xl border border-slate-200 p-4">
+                <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Occupied</p>
+                <p className="text-2xl font-bold text-red-600">{bedStats.occupied}</p>
               </div>
-              <div className="p-5">
-                {beds.length === 0 ? (
-                  <div className="text-center py-8 text-slate-500">
-                    <span className="material-symbols-outlined text-4xl mb-2">bed</span>
-                    <p>No beds found. Click "Add Bed" to create your first ICU bed.</p>
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                    {beds.map((bed) => (
-                      <div key={bed.id} className="border border-slate-200 rounded-xl p-4 hover:shadow-md transition-shadow">
-                        <div className="flex items-center justify-between mb-3">
-                          <div className="flex items-center gap-2">
-                            <span className="material-symbols-outlined text-2xl text-slate-600">bed</span>
-                            <h4 className="font-semibold text-slate-900">{bed.bed_id}</h4>
-                          </div>
-                          <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
-                            bed.is_available ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                          }`}>
-                            {bed.is_available ? 'Available' : 'Occupied'}
-                          </span>
-                        </div>
-                        
-                        <div className="space-y-2 mb-4">
-                          <div className="flex items-center justify-between">
-                            <span className="text-sm text-slate-500">Type:</span>
-                            <span className="text-sm font-medium text-slate-900">{bed.bed_type}</span>
-                          </div>
-                          <div className="flex items-center justify-between">
-                            <span className="text-sm text-slate-500">Ventilator:</span>
-                            <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
-                              bed.ventilator_available ? 'bg-green-100 text-green-800' : 'bg-slate-100 text-slate-600'
-                            }`}>
-                              {bed.ventilator_available ? 'Available' : 'Not Available'}
-                            </span>
-                          </div>
-                          <div className="flex items-center justify-between">
-                            <span className="text-sm text-slate-500">Dialysis:</span>
-                            <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
-                              bed.dialysis_available ? 'bg-green-100 text-green-800' : 'bg-slate-100 text-slate-600'
-                            }`}>
-                              {bed.dialysis_available ? 'Available' : 'Not Available'}
-                            </span>
-                          </div>
-                        </div>
-                        
-                        <div className="flex gap-2 pt-3 border-t border-slate-100">
-                          <button
-                            onClick={() => startEditBed(bed)}
-                            className="flex-1 flex items-center justify-center gap-1 px-3 py-2 bg-blue-50 hover:bg-blue-100 text-blue-600 text-sm font-medium rounded-lg transition-colors"
-                          >
-                            <span className="material-symbols-outlined text-[16px]">edit</span>
-                            Edit
-                          </button>
-                          <button
-                            onClick={() => handleDeleteBed(bed.id)}
-                            className="flex-1 flex items-center justify-center gap-1 px-3 py-2 bg-red-50 hover:bg-red-100 text-red-600 text-sm font-medium rounded-lg transition-colors"
-                          >
-                            <span className="material-symbols-outlined text-[16px]">delete</span>
-                            Delete
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
+              <div className="bg-white rounded-xl border border-slate-200 p-4">
+                <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Ventilator</p>
+                <p className="text-2xl font-bold text-blue-600">{bedStats.withVentilator}</p>
+              </div>
+              <div className="bg-white rounded-xl border border-slate-200 p-4">
+                <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Dialysis</p>
+                <p className="text-2xl font-bold text-purple-600">{bedStats.withDialysis}</p>
               </div>
             </div>
-          </>
+          )}
+
+          {/* Add/Edit Bed Modal */}
+          {showAddBedForm && (
+            <div className="fixed inset-0 bg-slate-900/20 backdrop-blur-sm flex items-center justify-center z-50">
+              <div className="bg-white rounded-2xl shadow-xl max-w-md w-full mx-4 max-h-[90vh] overflow-y-auto">
+                <div className="p-6 border-b border-slate-200">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-lg font-bold text-slate-900">
+                      {editingBed ? "Edit Bed" : "Add New Bed"}
+                    </h3>
+                    <button
+                      onClick={cancelBedForm}
+                      className="text-slate-400 hover:text-slate-600 transition-colors"
+                    >
+                      <span className="material-symbols-outlined text-2xl">close</span>
+                    </button>
+                  </div>
+                </div>
+                <div className="p-6">
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Bed ID</label>
+                      <input
+                        type="text"
+                        value={bedForm.bed_id}
+                        onChange={(e) => setBedForm({ ...bedForm, bed_id: e.target.value })}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="e.g., B001"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Bed Type</label>
+                      <select
+                        value={bedForm.bed_type}
+                        onChange={(e) => setBedForm({ ...bedForm, bed_type: e.target.value })}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      >
+                        <option value="Basic">Basic</option>
+                        <option value="Advanced">Advanced</option>
+                        <option value="Critical">Critical</option>
+                      </select>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        id="ventilator"
+                        checked={bedForm.ventilator_available}
+                        onChange={(e) => setBedForm({ ...bedForm, ventilator_available: e.target.checked })}
+                        className="w-4 h-4 text-blue-600 border-slate-300 rounded focus:ring-blue-500"
+                      />
+                      <label htmlFor="ventilator" className="text-sm font-medium text-slate-700">
+                        Ventilator Available
+                      </label>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        id="dialysis"
+                        checked={bedForm.dialysis_available}
+                        onChange={(e) => setBedForm({ ...bedForm, dialysis_available: e.target.checked })}
+                        className="w-4 h-4 text-blue-600 border-slate-300 rounded focus:ring-blue-500"
+                      />
+                      <label htmlFor="dialysis" className="text-sm font-medium text-slate-700">
+                        Dialysis Available
+                      </label>
+                    </div>
+                  </div>
+                  <div className="flex gap-3 mt-6">
+                    <button
+                      onClick={editingBed ? handleUpdateBed : handleAddBed}
+                      disabled={bedFormLoading || !bedForm.bed_id}
+                      className="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-slate-300 text-white font-medium rounded-lg transition-colors"
+                    >
+                      {bedFormLoading ? "Saving..." : editingBed ? "Update Bed" : "Add Bed"}
+                    </button>
+                    <button
+                      onClick={cancelBedForm}
+                      className="flex-1 px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 font-medium rounded-lg transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Beds List */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm">
+            <div className="p-5 border-b border-slate-200">
+              <h3 className="text-lg font-bold text-slate-900">ICU Beds ({beds.length})</h3>
+            </div>
+            <div className="p-5">
+              {beds.length === 0 ? (
+                <div className="text-center py-8 text-slate-500">
+                  <span className="material-symbols-outlined text-4xl mb-2">bed</span>
+                  <p>No beds found. Click "Add Bed" to create your first ICU bed.</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {beds.map((bed) => (
+                    <ICUBedCard
+                      key={bed.id}
+                      bed={bed}
+                      onEdit={startEditBed}
+                      onDelete={handleDeleteBed}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </>
       </main>
     </div>
   );

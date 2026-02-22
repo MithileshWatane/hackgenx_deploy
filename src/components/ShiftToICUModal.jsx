@@ -19,11 +19,44 @@ export default function ShiftToICUModal({ patient, onClose, onShift }) {
         dialysis_needed: false,
     });
 
+    // ── Scheduling Algorithm ──────────────────────────────────────────────────
+    // Port of backend/services/icuScheduler.js:
+    //  1. Emergency patients first
+    //  2. Higher severity first (critical > severe > moderate)
+    //  3. Earlier arrival time first
+    //  4. Find best compatible bed (ventilator / dialysis requirements met)
+
+    const severityRank = { critical: 4, severe: 3, moderate: 2, low: 1 };
+
+    const findBestBed = (availableBeds, patient) => {
+        let bestBed = null;
+        let bestScore = -1;
+
+        for (const bed of availableBeds) {
+            // Hard compatibility check: patient requirements must be met
+            const ventilatorOk = !patient.ventilator_needed || bed.ventilator_available;
+            const dialysisOk = !patient.dialysis_needed || bed.dialysis_available;
+            if (!ventilatorOk || !dialysisOk) continue;
+
+            // Score: prefer beds with exact equipment match (avoid over-provisioning)
+            let score = 0;
+            if (bed.ventilator_available === patient.ventilator_needed) score += 1;
+            if (bed.dialysis_available === patient.dialysis_needed) score += 1;
+
+            if (score > bestScore) {
+                bestScore = score;
+                bestBed = bed;
+            }
+        }
+        return bestBed;
+    };
+
     const handleSubmit = async (e) => {
         e.preventDefault();
         setLoading(true);
         try {
-            const { error } = await supabase
+            // 1. Insert patient into icu_queue
+            const { data: insertedRows, error } = await supabase
                 .from('icu_queue')
                 .insert([{
                     ...formData,
@@ -31,9 +64,60 @@ export default function ShiftToICUModal({ patient, onClose, onShift }) {
                     original_bed_id: patient?.original_bed_id || null,
                     time: new Date().toISOString(),
                     status: 'waiting'
-                }]);
+                }])
+                .select();
 
             if (error) throw error;
+            const queueEntry = insertedRows?.[0];
+
+            // 2. Fetch available ICU beds
+            const { data: availableBeds, error: bedError } = await supabase
+                .from('icu_beds')
+                .select('*')
+                .eq('is_available', true);
+
+            if (bedError) throw bedError;
+
+            let assignedBed = null;
+
+            if (availableBeds && availableBeds.length > 0) {
+                // 3. Run scheduling algorithm to find best bed
+                assignedBed = findBestBed(availableBeds, formData);
+
+                if (assignedBed) {
+                    const admissionTime = new Date();
+                    const dischargeTime = new Date(admissionTime);
+                    dischargeTime.setDate(dischargeTime.getDate() + (formData.predicted_stay_days || 7));
+
+                    // 4a. Mark bed as occupied
+                    const { error: bedUpdateError } = await supabase
+                        .from('icu_beds')
+                        .update({ is_available: false })
+                        .eq('id', assignedBed.id);
+                    if (bedUpdateError) throw bedUpdateError;
+
+                    // 4b. Update icu_queue entry with assigned bed & status
+                    if (queueEntry?.id) {
+                        const { error: queueUpdateError } = await supabase
+                            .from('icu_queue')
+                            .update({
+                                status: 'assigned',
+                                assigned_bed_id: assignedBed.id,
+                                assigned_bed_label: assignedBed.bed_id,
+                                admission_time: admissionTime.toISOString(),
+                                discharge_time: dischargeTime.toISOString(),
+                            })
+                            .eq('id', queueEntry.id);
+                        if (queueUpdateError) throw queueUpdateError;
+                    }
+                }
+            }
+
+            const message = assignedBed
+                ? `✅ ${formData.patient_name} assigned to ICU Bed ${assignedBed.bed_id}!\nEstimated discharge in ${formData.predicted_stay_days} days.`
+                : `📋 ${formData.patient_name} added to ICU waiting queue.\nNo bed currently available — will be assigned when one frees up.`;
+
+            alert(message);
             onShift();
             onClose();
         } catch (err) {
@@ -43,6 +127,7 @@ export default function ShiftToICUModal({ patient, onClose, onShift }) {
             setLoading(false);
         }
     };
+
 
     return (
         <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 backdrop-blur-sm">
