@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext_simple';
 const navItems = [
     { icon: 'queue', label: 'OPD Queue', path: '/dashboard' },
     { icon: 'bed', label: 'Bed Queue', path: '/bed-queue' },
+    { icon: 'monitor_heart', label: 'ICU Queue', path: '/icu-queue' },
     { icon: 'meeting_room', label: 'Bed Management', path: '/bed-management' },
     { icon: 'schedule', label: 'ICU Scheduling', path: '/icu-scheduling' },
     { icon: 'groups', label: 'Patients', path: '/patients' },

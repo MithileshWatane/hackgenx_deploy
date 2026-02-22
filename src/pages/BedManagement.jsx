@@ -1,10 +1,13 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import DailyRoundModal from '../components/DailyRoundModal';
+import ShiftToICUModal from '../components/ShiftToICUModal';
+import { useAuth } from '../context/AuthContext_simple';
+
 
 // ── Bed Card ──────────────────────────────────────────────────────────────────
 
-function BedCard({ bed, onUpdate, onDischarge, onUpdateRound }) {
+function BedCard({ bed, onUpdate, onDischarge, onUpdateRound, onShiftToICU }) {
     const { bed_id, id, bed_number, status, patient, admission, notes } = bed;
 
     const bedId = bed_id || id;
@@ -167,6 +170,12 @@ function BedCard({ bed, onUpdate, onDischarge, onUpdateRound }) {
                 <DischargeInfo accent="blue" />
                 {notes && <p className="text-xs font-medium text-slate-700 bg-slate-50 p-1.5 rounded">Note: {notes}</p>}
                 <div className="mt-auto pt-2 border-t border-slate-100 flex items-center justify-end gap-2">
+                    {isGeneral && (
+                        <button
+                            onClick={(e) => { e.stopPropagation(); onShiftToICU(bed); }}
+                            className="text-[10px] font-bold uppercase tracking-wider bg-red-50 text-red-600 px-2 py-1 rounded hover:bg-red-600 hover:text-white transition-colors border border-red-100"
+                        >Shift to ICU</button>
+                    )}
                     <button
                         onClick={(e) => { e.stopPropagation(); onDischarge(bedId); }}
                         className="text-[10px] font-bold uppercase tracking-wider bg-blue-50 text-[#2b8cee] px-2 py-1 rounded hover:bg-[#2b8cee] hover:text-white transition-colors border border-[#2b8cee]/20"
@@ -324,7 +333,9 @@ export default function BedManagement() {
     const [loading, setLoading] = useState(true);
     const [showAddBed, setShowAddBed] = useState(false);
     const [showRoundModal, setShowRoundModal] = useState(false);
+    const [showShiftModal, setShowShiftModal] = useState(false);
     const [selectedBed, setSelectedBed] = useState(null);
+    const [selectedBedForShift, setSelectedBedForShift] = useState(null);
 
     const fetchBeds = useCallback(async () => {
         setLoading(true);
@@ -335,7 +346,7 @@ export default function BedManagement() {
                     *,
                     patient_id,
                     queue_entry:bed_queue(
-                        id, patient_name, disease, phone, age,
+                        id, patient_name, disease, phone, age, token_number,
                         admitted_from_opd_at, bed_assigned_at, status,
                         predictions:discharge_predictions(
                             predicted_discharge_date, remaining_days, confidence, reasoning, created_at
@@ -451,6 +462,21 @@ export default function BedManagement() {
                     onUpdate={fetchBeds}
                 />
             )}
+            {showShiftModal && selectedBedForShift && (
+                <ShiftToICUModal
+                    patient={{
+                        token_number: selectedBedForShift.activeQueue?.token_number,
+                        patient_name: selectedBedForShift.activeQueue?.patient_name,
+                        disease: selectedBedForShift.activeQueue?.disease,
+                        original_bed_id: selectedBedForShift.bed_id || selectedBedForShift.id
+                    }}
+                    onClose={() => { setShowShiftModal(false); setSelectedBedForShift(null); }}
+                    onShift={() => {
+                        alert('Patient added to ICU Queue successfully!');
+                        fetchBeds();
+                    }}
+                />
+            )}
 
             <header className="flex items-center justify-between border-b border-slate-200 bg-white px-6 py-3 shrink-0 shadow-sm">
                 <div className="flex items-center gap-4">
@@ -519,6 +545,7 @@ export default function BedManagement() {
                                         onUpdate={handleUpdateBedStatus}
                                         onDischarge={handleDischarge}
                                         onUpdateRound={(b) => { setSelectedBed(b); setShowRoundModal(true); }}
+                                        onShiftToICU={(b) => { setSelectedBedForShift(b); setShowShiftModal(true); }}
                                     />
                                 ))}
                             </div>
