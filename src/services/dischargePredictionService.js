@@ -68,6 +68,8 @@ export async function runDischargePrediction(queueId, currentRoundId, bedQueueEn
             disease: bedQueueEntry.disease || bedQueueEntry.diseases, // ICU uses plural 'diseases'
             admitted_on: admittedDate.toISOString(),
             current_datetime: now.toISOString(),
+            current_local_date: now.toLocaleDateString('en-CA'), // YYYY-MM-DD
+            current_local_time: now.toLocaleTimeString(),
             days_since_admission: daysSinceAdmission,
             total_rounds_recorded: timeline.length,
             clinical_timeline: timeline,
@@ -146,7 +148,7 @@ ANALYSIS INSTRUCTIONS:
 1. Examine the clinical_timeline chronologically for trends in vitals (temperature, heart rate, BP, oxygen), condition status (improving/stable/critical), and doctor notes.
 2. Consider AI summaries from lab/radiology reports as objective clinical evidence.
 3. Account for days_since_admission — this patient is already ${patientContext.days_since_admission} day(s) into their stay.
-4. Base remaining_days on realistic REMAINING recovery time, not total stay.
+4. Base remaining_days on realistic REMAINING recovery time starting from the provided current_local_date (${patientContext.current_local_date}).
 5. Confidence: 0.0–1.0. Higher when trend is clear and multiple rounds exist; lower when data is sparse.
 
 RESPOND WITH ONLY THIS JSON OBJECT (no markdown, no explanation, just raw JSON):

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext_simple';
 import { supabase } from '../lib/supabase';
 import ShiftToICUModal from '../components/ShiftToICUModal';
+import { autoAssignBed } from '../services/autoBedAssignmentService';
 
 const MOVING_AVG_WINDOW = 5;
 const DEFAULT_WAIT_MINUTES = 15;
@@ -255,7 +256,7 @@ export default function QueueDashboard() {
         setAdmittingId(queueEntry.id);
         try {
             // 1. Insert into bed_queue
-            const { error: bqError } = await supabase
+            const { data: insertedQueue, error: bqError } = await supabase
                 .from('bed_queue')
                 .insert([{
                     opd_queue_id: queueEntry.id,
@@ -267,10 +268,22 @@ export default function QueueDashboard() {
                     bed_type: 'general',
                     status: 'waiting_for_bed',
                     admitted_from_opd_at: new Date().toISOString(),
-                }]);
+                }])
+                .select();
+
             if (bqError) throw bqError;
 
-            // 2. Mark the OPD queue entry as completed
+            // 2. Auto-assign bed if available
+            let assignmentResult = null;
+            if (insertedQueue && insertedQueue[0]) {
+                assignmentResult = await autoAssignBed(
+                    insertedQueue[0].id,
+                    queueEntry.patient_name,
+                    'general'
+                );
+            }
+
+            // 3. Mark the OPD queue entry as completed
             const completedAt = new Date().toISOString();
             const actualWaitMinutes = parseFloat(
                 ((Date.now() - new Date(queueEntry.entered_queue_at).getTime()) / 60000).toFixed(2)
@@ -286,7 +299,15 @@ export default function QueueDashboard() {
                 .eq('id', queueEntry.id);
 
             await fetchQueue();
-            alert(`${queueEntry.patient_name} added to General Ward queue.`);
+            
+            // Show appropriate message based on assignment result
+            if (assignmentResult?.bedAssigned) {
+                alert(`✅ ${queueEntry.patient_name} admitted and assigned to Bed ${assignmentResult.bed.bed_number}!`);
+            } else if (assignmentResult?.waitTimeMinutes) {
+                alert(`📋 ${queueEntry.patient_name} added to bed queue.\nEstimated wait time: ${Math.ceil(assignmentResult.waitTimeMinutes / 60)}h ${assignmentResult.waitTimeMinutes % 60}m`);
+            } else {
+                alert(`${queueEntry.patient_name} added to General Ward queue.`);
+            }
         } catch (err) {
             console.error('Admit error:', err);
             alert('Failed to admit: ' + err.message);

@@ -249,9 +249,19 @@ export default function ICUScheduling() {
 
     const countdown = (dischargeIso) => {
       if (!dischargeIso) return null;
-      const diffMs = new Date(dischargeIso).getTime() - Date.now();
-      if (diffMs <= 0) return { label: 'Overdue', color: 'text-red-500' };
-      const days = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const targetDate = new Date(dischargeIso);
+      targetDate.setHours(0, 0, 0, 0);
+
+      const diffMs = targetDate.getTime() - today.getTime();
+      const days = Math.round(diffMs / (1000 * 60 * 60 * 24));
+
+      if (days < 0) return { label: 'Overdue', color: 'text-red-500' };
+      if (days === 0) return { label: 'DC Today', color: 'text-amber-500 font-bold' };
+
       return {
         label: `${days}d left`,
         color: days <= 1 ? 'text-amber-500' : 'text-emerald-600'

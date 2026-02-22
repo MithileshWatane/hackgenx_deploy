@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase';
 import DailyRoundModal from '../components/DailyRoundModal';
 import ShiftToICUModal from '../components/ShiftToICUModal';
 import { useAuth } from '../context/AuthContext_simple';
+import { processWaitingQueue, assignSinglePatient } from '../services/autoBedAssignmentService';
 
 
 // ── Bed Card ──────────────────────────────────────────────────────────────────
@@ -23,9 +24,20 @@ function BedCard({ bed, onUpdate, onDischarge, onUpdateRound, onShiftToICU }) {
 
     const countdown = (dischargeIso) => {
         if (!dischargeIso) return null;
-        const diffMs = new Date(dischargeIso).getTime() - Date.now();
-        if (diffMs <= 0) return { label: 'Overdue', color: 'text-red-500' };
-        const days = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+
+        // Reset times to midnight for calendar-day calculation
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        const targetDate = new Date(dischargeIso);
+        targetDate.setHours(0, 0, 0, 0);
+
+        const diffMs = targetDate.getTime() - today.getTime();
+        const days = Math.round(diffMs / (1000 * 60 * 60 * 24));
+
+        if (days < 0) return { label: 'Overdue', color: 'text-red-500' };
+        if (days === 0) return { label: 'DC Today', color: 'text-amber-500 font-bold' };
+
         return {
             label: `${days}d left`,
             color: days <= 1 ? 'text-amber-500' : 'text-emerald-600'
@@ -369,6 +381,15 @@ export default function BedManagement() {
                 .update({ status: newStatus })
                 .eq('bed_id', id);
             if (error) throw error;
+
+            // If bed is now available, try to auto-assign to the oldest waiting patient
+            if (newStatus === 'available') {
+                const result = await assignSinglePatient();
+                if (result.assigned > 0) {
+                    alert(`✅ ${result.message}`);
+                }
+            }
+
             fetchBeds();
         } catch (err) {
             console.error('Update bed status error:', err);
@@ -398,6 +419,12 @@ export default function BedManagement() {
                 .in('status', ['admitted', 'bed_assigned']);
 
             if (queueError) throw queueError;
+
+            // 3. Try to auto-assign the freed bed to the oldest waiting patient
+            const result = await assignSinglePatient();
+            if (result.assigned > 0) {
+                alert(`✅ ${result.message}`);
+            }
 
             fetchBeds();
         } catch (err) {
