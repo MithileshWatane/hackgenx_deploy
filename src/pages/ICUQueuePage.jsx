@@ -44,12 +44,14 @@ const STATUS_COLORS = {
     waiting: 'bg-amber-100 text-amber-800 border-amber-200',
     assigned: 'bg-green-100 text-green-800 border-green-200',
     cancelled: 'bg-slate-100 text-slate-500 border-slate-200',
+    discharged: 'bg-blue-100 text-blue-800 border-blue-200',
 };
 
 const STATUS_LABEL = {
     waiting: 'Waiting',
     assigned: 'Assigned',
     cancelled: 'Cancelled',
+    discharged: 'Discharged',
 };
 
 function StatusBadge({ status }) {
@@ -97,11 +99,14 @@ export default function ICUQueuePage() {
         if (!user?.id) { setLoading(false); return; }
         setLoading(true);
         try {
-            const { data, error } = await supabase
+            let query = supabase
                 .from('icu_queue')
                 .select('*')
-                .in('status', ['waiting', 'assigned', 'cancelled'])
-                .order('time', { ascending: true });
+                .order('time', { ascending: false });
+
+            // We fetch everything to have accurate counts for all tabs
+            // but the 'filtered' variable in the component will handle the view filtering
+            const { data, error } = await query;
 
             if (error) throw error;
             setQueue(data || []);
@@ -176,13 +181,54 @@ export default function ICUQueuePage() {
         }
     };
 
+    const handleDischarge = async (patient) => {
+        if (!window.confirm(`Discharge ${patient.patient_name} from ICU?`)) return;
+        setUpdatingId(patient.id);
+        try {
+            // 1. Free up the ICU bed
+            if (patient.assigned_bed_id) {
+                const { error: bedError } = await supabase
+                    .from('icu_beds')
+                    .update({ is_available: true })
+                    .eq('id', patient.assigned_bed_id);
+
+                if (bedError) throw bedError;
+            }
+
+            // 2. Update queue status
+            const { error: queueError } = await supabase
+                .from('icu_queue')
+                .update({
+                    status: 'discharged',
+                    discharged_at: new Date().toISOString()
+                })
+                .eq('id', patient.id);
+
+            if (queueError) throw queueError;
+
+            alert(`✅ ${patient.patient_name} has been discharged.`);
+            fetchQueue();
+        } catch (err) {
+            console.error('Discharge error:', err);
+            alert('Error: ' + err.message);
+        } finally {
+            setUpdatingId(null);
+        }
+    };
+
     const stats = {
         waiting: queue.filter(p => p.status === 'waiting').length,
         assigned: queue.filter(p => p.status === 'assigned').length,
+        discharged: queue.filter(p => p.status === 'discharged').length,
     };
 
     const filtered = queue.filter(p => {
-        if (activeFilter !== 'all' && p.status !== activeFilter) return false;
+        if (activeFilter === 'all') {
+            if (p.status === 'discharged') return false;
+        } else if (p.status !== activeFilter) {
+            return false;
+        }
+
         const q = search.toLowerCase();
         return (
             p.patient_name?.toLowerCase().includes(q) ||
@@ -192,10 +238,10 @@ export default function ICUQueuePage() {
     });
 
     const FILTERS = [
-        { key: 'all', label: 'All Requests', count: queue.length },
+        { key: 'all', label: 'All Active', count: queue.filter(p => p.status !== 'discharged').length },
         { key: 'waiting', label: 'Waiting', count: stats.waiting },
         { key: 'assigned', label: 'Assigned', count: stats.assigned },
-        { key: 'cancelled', label: 'Cancelled', count: null },
+        { key: 'discharged', label: 'Discharged', count: stats.discharged },
     ];
 
     return (
@@ -298,14 +344,22 @@ export default function ICUQueuePage() {
                                                     <div className="flex flex-wrap gap-1">
                                                         {p.ventilator_needed && <span className="text-[10px] bg-red-500 text-white px-1.5 py-0.5 rounded font-bold uppercase">Vent</span>}
                                                         {p.dialysis_needed && <span className="text-[10px] bg-purple-500 text-white px-1.5 py-0.5 rounded font-bold uppercase">Dial</span>}
-                                                        {p.is_emergency && <span className="text-[10px] bg-orange-500 text-white px-1.5 py-0.5 rounded font-bold uppercase">🚨 ER</span>}
                                                     </div>
                                                     <SeverityBadge severity={p.severity} />
                                                 </div>
                                             </td>
                                             <td className="px-5 py-4">
-                                                <div className="text-xs font-bold text-slate-700">{timeSince(p.time)}</div>
-                                                <div className="text-[10px] text-slate-400">{timeAgo(p.time)}</div>
+                                                {p.status === 'discharged' ? (
+                                                    <div className="flex flex-col">
+                                                        <span className="text-xs font-bold text-slate-700">Discharged</span>
+                                                        <span className="text-[10px] text-slate-500">{formatDate(p.discharged_at)}</span>
+                                                    </div>
+                                                ) : (
+                                                    <>
+                                                        <div className="text-xs font-bold text-slate-700">{timeSince(p.time)}</div>
+                                                        <div className="text-[10px] text-slate-400">{timeAgo(p.time)}</div>
+                                                    </>
+                                                )}
                                             </td>
                                             <td className="px-5 py-4">
                                                 <div className="flex flex-col items-center gap-1.5">
@@ -345,13 +399,29 @@ export default function ICUQueuePage() {
                                                         </>
                                                     )}
                                                     {p.status === 'assigned' && (
-                                                        <div className="flex flex-col items-end">
-                                                            <span className="text-xs text-green-600 font-bold flex items-center gap-1">
-                                                                <span className="material-symbols-outlined text-[14px]">check_circle</span>
-                                                                Assigned
-                                                            </span>
-                                                            <span className="text-[10px] text-slate-400 mt-1">Est. discharge: {formatDate(p.discharge_time)}</span>
+                                                        <div className="flex flex-col items-end gap-2">
+                                                            <div className="flex flex-col items-end">
+                                                                <span className="text-xs text-green-600 font-bold flex items-center gap-1">
+                                                                    <span className="material-symbols-outlined text-[14px]">check_circle</span>
+                                                                    Assigned
+                                                                </span>
+                                                                <span className="text-[10px] text-slate-400 mt-1">Est. discharge: {formatDate(p.discharge_time)}</span>
+                                                            </div>
+                                                            <button
+                                                                onClick={() => handleDischarge(p)}
+                                                                disabled={updatingId === p.id}
+                                                                className="bg-slate-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold hover:bg-slate-700 transition-colors shadow-sm flex items-center gap-1.5 disabled:opacity-50"
+                                                            >
+                                                                <span className="material-symbols-outlined text-sm">logout</span>
+                                                                Discharge
+                                                            </button>
                                                         </div>
+                                                    )}
+                                                    {p.status === 'discharged' && (
+                                                        <span className="text-xs text-slate-400 font-bold flex items-center gap-1">
+                                                            <span className="material-symbols-outlined text-[14px]">archive</span>
+                                                            Archived
+                                                        </span>
                                                     )}
                                                 </div>
                                             </td>
