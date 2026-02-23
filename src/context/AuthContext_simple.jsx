@@ -77,18 +77,23 @@ export function AuthProvider({ children }) {
         setUserRole(role)
       }
 
-      // Update user profile with address information after signup
+      // Update user profile with address information and coordinates after signup
       if (data.user) {
+        const updateData = {
+          role: role,
+          street: addressData?.street,
+          city: addressData?.city,
+          state: addressData?.state,
+          zip_code: addressData?.zipCode,
+          country: addressData?.country || 'India',
+          // Only store coordinates for doctors, NULL for patients
+          latitude: role === 'doctor' ? addressData?.latitude : null,
+          longitude: role === 'doctor' ? addressData?.longitude : null
+        };
+
         const { error: updateError } = await supabase
           .from('user_profiles')
-          .update({
-            role: role,
-            street: addressData?.street,
-            city: addressData?.city,
-            state: addressData?.state,
-            zip_code: addressData?.zipCode,
-            country: addressData?.country || 'India'
-          })
+          .update(updateData)
           .eq('id', data.user.id)
         
         if (updateError) {
