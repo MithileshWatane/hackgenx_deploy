@@ -14,6 +14,7 @@ export const bookAppointment = async (req, res, next) => {
       appointmentDate,
       doctorId,
       notes,
+      isEmergency,
     } = req.body;
 
     console.log("Received appointment booking request:", {
@@ -24,6 +25,7 @@ export const bookAppointment = async (req, res, next) => {
       disease,
       appointmentDate,
       doctorId,
+      isEmergency,
     });
 
     // Validate input
@@ -45,27 +47,48 @@ export const bookAppointment = async (req, res, next) => {
       appointmentDate: appointmentDate || new Date().toISOString(),
       doctorId,
       notes,
+      isEmergency: isEmergency || false,
     });
 
-    // Get queue position
-    const queueStatus = await supabaseService.getAppointmentStatus(
-      appointment.token_number
-    );
+    // If emergency, return ICU queue info
+    if (isEmergency) {
+      res.status(201).json({
+        success: true,
+        message: "Emergency appointment booked successfully - added to ICU queue",
+        data: {
+          appointmentId: appointment.id,
+          tokenNumber: appointment.token_number,
+          patientName: appointment.patient_name,
+          appointmentDate: appointment.appointment_date,
+          doctorId: appointment.doctor_id,
+          status: appointment.status,
+          isEmergency: true,
+          queueType: 'ICU',
+        },
+      });
+    } else {
+      // Get queue position for regular appointments
+      const queueStatus = await supabaseService.getAppointmentStatus(
+        appointment.token_number
+      );
 
-    res.status(201).json({
-      success: true,
-      message: "Appointment booked successfully",
-      data: {
-        appointmentId: appointment.id,
-        tokenNumber: appointment.token_number,
-        patientName: appointment.patient_name,
-        appointmentDate: appointment.appointment_date,
-        doctorId: appointment.doctor_id,
-        status: appointment.status,
-        queuePosition: queueStatus?.queue_position || null,
-        estimatedWaitTime: queueStatus?.estimated_wait_minutes || null,
-      },
-    });
+      res.status(201).json({
+        success: true,
+        message: "Appointment booked successfully",
+        data: {
+          appointmentId: appointment.id,
+          tokenNumber: appointment.token_number,
+          patientName: appointment.patient_name,
+          appointmentDate: appointment.appointment_date,
+          doctorId: appointment.doctor_id,
+          status: appointment.status,
+          queuePosition: queueStatus?.queue_position || null,
+          estimatedWaitTime: queueStatus?.estimated_wait_minutes || null,
+          isEmergency: false,
+          queueType: 'OPD',
+        },
+      });
+    }
   } catch (error) {
     console.error("Appointment booking controller error:", error);
 

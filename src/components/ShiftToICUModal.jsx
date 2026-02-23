@@ -16,7 +16,7 @@ export default function ShiftToICUModal({ patient, onClose, onShift }) {
         surgery_type: '',
         bed_type: 'icu',
         severity: 'critical',
-        is_emergency: true,
+        is_emergency: false,
         predicted_stay_days: 7,
         ventilator_needed: false,
         dialysis_needed: false,
@@ -242,14 +242,7 @@ export default function ShiftToICUModal({ patient, onClose, onShift }) {
                         </div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-4">
-                        <div>
-                            <label className="block text-[10px] font-bold text-slate-700 uppercase mb-1">Is Emergency</label>
-                            <select value={formData.is_emergency} onChange={e => setFormData({ ...formData, is_emergency: e.target.value === 'true' })} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-red-500/20 focus:border-red-500 outline-none">
-                                <option value="true">Yes (Emergency)</option>
-                                <option value="false">No (Planned)</option>
-                            </select>
-                        </div>
+                    <div className="grid grid-cols-1 gap-4">
                         <div>
                             <label className="block text-[10px] font-bold text-slate-700 uppercase mb-1">Stay Duration (Est. Days)</label>
                             <input type="number" min="1" max="100" value={formData.predicted_stay_days} onChange={e => setFormData({ ...formData, predicted_stay_days: parseInt(e.target.value) })} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-red-500/20 focus:border-red-500 outline-none" />

@@ -44,7 +44,8 @@ export default function AppointmentScheduling() {
     phone: '',
     email: '',
     appointment_date: '',
-    notes: ''
+    notes: '',
+    is_emergency: false
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -52,8 +53,11 @@ export default function AppointmentScheduling() {
   const [queueInfo, setQueueInfo] = useState(null); // { position, estimatedWait, token }
 
   const handleInputChange = (e) => {
-    const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: value }));
+    const { name, value, type, checked } = e.target;
+    setFormData(prev => ({ 
+      ...prev, 
+      [name]: type === 'checkbox' ? checked : value 
+    }));
   };
 
   const handleSubmit = async (e) => {
@@ -74,13 +78,7 @@ export default function AppointmentScheduling() {
     try {
       setLoading(true);
 
-      // Step 1 – Compute moving average and next queue position in parallel
-      const [estimatedWait, queuePosition] = await Promise.all([
-        computeMovingAverage(user?.id),
-        getNextQueuePosition(user?.id),
-      ]);
-
-      // Step 2 – Insert appointment
+      // Step 1 – Insert appointment
       const { data: apptData, error: apptError } = await supabase
         .from('appointments')
         .insert([{
@@ -92,37 +90,68 @@ export default function AppointmentScheduling() {
           appointment_date: formData.appointment_date,
           notes: formData.notes,
           doctor_id: user?.id,
-          status: 'scheduled'
+          status: 'scheduled',
+          is_emergency: formData.is_emergency
         }])
         .select();
 
       if (apptError) throw apptError;
 
       const appointment = apptData?.[0];
-      const tokenNumber = appointment?.token_number || `OPD-${queuePosition}`;
 
-      // Step 3 – Add patient to OPD queue
-      const { error: queueError } = await supabase
-        .from('opd_queue')
-        .insert([{
-          appointment_id: appointment?.id,
-          patient_name: formData.patient_name,
-          disease: formData.disease,
-          token_number: tokenNumber,
-          doctor_id: user?.id,
-          queue_position: queuePosition,
-          status: 'waiting',
-          estimated_wait_minutes: estimatedWait,
-          entered_queue_at: new Date().toISOString(),
-        }]);
+      // Step 2 – Check if emergency patient
+      if (formData.is_emergency) {
+        // Add directly to ICU queue
+        const tokenNumber = appointment?.token_number || `ICU-${Date.now()}`;
+        
+        const { error: icuError } = await supabase
+          .from('icu_queue')
+          .insert([{
+            patient_token: tokenNumber,
+            patient_name: formData.patient_name,
+            diseases: formData.disease,
+            doctor_id: user?.id,
+            is_emergency: true,
+            status: 'waiting',
+            severity: 'critical',
+            created_at: new Date().toISOString(),
+          }]);
 
-      if (queueError) throw queueError;
+        if (icuError) throw icuError;
 
-      setQueueInfo({ position: queuePosition, estimatedWait, token: tokenNumber });
-      setSuccess(`Appointment booked! Patient added to OPD Queue.`);
+        setQueueInfo({ token: tokenNumber, isEmergency: true });
+        setSuccess(`Emergency appointment booked! Patient added directly to ICU Queue.`);
+      } else {
+        // Regular flow - compute moving average and add to OPD queue
+        const [estimatedWait, queuePosition] = await Promise.all([
+          computeMovingAverage(user?.id),
+          getNextQueuePosition(user?.id),
+        ]);
+
+        const tokenNumber = appointment?.token_number || `OPD-${queuePosition}`;
+
+        const { error: queueError } = await supabase
+          .from('opd_queue')
+          .insert([{
+            appointment_id: appointment?.id,
+            patient_name: formData.patient_name,
+            disease: formData.disease,
+            token_number: tokenNumber,
+            doctor_id: user?.id,
+            queue_position: queuePosition,
+            status: 'waiting',
+            estimated_wait_minutes: estimatedWait,
+            entered_queue_at: new Date().toISOString(),
+          }]);
+
+        if (queueError) throw queueError;
+
+        setQueueInfo({ position: queuePosition, estimatedWait, token: tokenNumber });
+        setSuccess(`Appointment booked! Patient added to OPD Queue.`);
+      }
       setFormData({
         patient_name: '', age: '', disease: '', phone: '',
-        email: '', appointment_date: '', notes: ''
+        email: '', appointment_date: '', notes: '', is_emergency: false
       });
     } catch (err) {
       setError('Failed to schedule appointment: ' + err.message);
@@ -154,11 +183,15 @@ export default function AppointmentScheduling() {
           {/* Queue Success Banner */}
           {success && queueInfo && (
             <div className="mb-6 rounded-2xl overflow-hidden shadow-lg border border-green-200">
-              <div className="bg-gradient-to-r from-green-500 to-emerald-600 px-6 py-4 flex items-center gap-3">
-                <span className="material-symbols-outlined text-white text-3xl">check_circle</span>
+              <div className={`${queueInfo.isEmergency ? 'bg-gradient-to-r from-red-500 to-red-600' : 'bg-gradient-to-r from-green-500 to-emerald-600'} px-6 py-4 flex items-center gap-3`}>
+                <span className="material-symbols-outlined text-white text-3xl">
+                  {queueInfo.isEmergency ? 'emergency' : 'check_circle'}
+                </span>
                 <div>
                   <p className="text-white font-bold text-lg">{success}</p>
-                  <p className="text-green-100 text-sm">Patient is now in the OPD waiting queue</p>
+                  <p className={`${queueInfo.isEmergency ? 'text-red-100' : 'text-green-100'} text-sm`}>
+                    {queueInfo.isEmergency ? 'Emergency patient prioritized for ICU' : 'Patient is now in the OPD waiting queue'}
+                  </p>
                 </div>
               </div>
               <div className="bg-white px-6 py-4 grid grid-cols-3 gap-4">
@@ -166,14 +199,30 @@ export default function AppointmentScheduling() {
                   <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Token</p>
                   <p className="text-2xl font-bold text-[#2b8cee]">{queueInfo.token}</p>
                 </div>
-                <div className="text-center p-3 bg-slate-50 rounded-xl">
-                  <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Queue Position</p>
-                  <p className="text-2xl font-bold text-slate-900">#{queueInfo.position}</p>
-                </div>
-                <div className="text-center p-3 bg-amber-50 rounded-xl border border-amber-200">
-                  <p className="text-xs font-semibold text-amber-600 uppercase mb-1">Est. Wait Time</p>
-                  <p className="text-2xl font-bold text-amber-700">~{queueInfo.estimatedWait} min</p>
-                </div>
+                {!queueInfo.isEmergency && (
+                  <>
+                    <div className="text-center p-3 bg-slate-50 rounded-xl">
+                      <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Queue Position</p>
+                      <p className="text-2xl font-bold text-slate-900">#{queueInfo.position}</p>
+                    </div>
+                    <div className="text-center p-3 bg-amber-50 rounded-xl border border-amber-200">
+                      <p className="text-xs font-semibold text-amber-600 uppercase mb-1">Est. Wait Time</p>
+                      <p className="text-2xl font-bold text-amber-700">~{queueInfo.estimatedWait} min</p>
+                    </div>
+                  </>
+                )}
+                {queueInfo.isEmergency && (
+                  <>
+                    <div className="text-center p-3 bg-red-50 rounded-xl border border-red-200">
+                      <p className="text-xs font-semibold text-red-600 uppercase mb-1">Priority</p>
+                      <p className="text-2xl font-bold text-red-700">EMERGENCY</p>
+                    </div>
+                    <div className="text-center p-3 bg-red-50 rounded-xl border border-red-200">
+                      <p className="text-xs font-semibold text-red-600 uppercase mb-1">Queue Type</p>
+                      <p className="text-2xl font-bold text-red-700">ICU</p>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           )}
@@ -298,13 +347,36 @@ export default function AppointmentScheduling() {
                 />
               </div>
 
+              <div className="flex items-center gap-3 p-4 bg-red-50 border-2 border-red-200 rounded-xl">
+                <input
+                  type="checkbox"
+                  id="is_emergency"
+                  name="is_emergency"
+                  checked={formData.is_emergency}
+                  onChange={handleInputChange}
+                  className="w-5 h-5 text-red-600 border-red-300 rounded focus:ring-red-500 focus:ring-2 cursor-pointer"
+                />
+                <label htmlFor="is_emergency" className="flex items-center gap-2 cursor-pointer flex-1">
+                  <span className="material-symbols-outlined text-red-600 text-2xl">emergency</span>
+                  <div>
+                    <p className="text-sm font-bold text-red-700">Emergency Patient</p>
+                    <p className="text-xs text-red-600">Skip OPD queue and add directly to ICU queue</p>
+                  </div>
+                </label>
+              </div>
+
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full bg-gradient-to-r from-[#2b8cee] to-[#1e6bb8] hover:shadow-lg text-white font-semibold py-3 rounded-lg transition-all duration-200 disabled:opacity-50 flex items-center justify-center gap-2 mt-6"
+                className={`w-full ${formData.is_emergency ? 'bg-gradient-to-r from-red-600 to-red-700' : 'bg-gradient-to-r from-[#2b8cee] to-[#1e6bb8]'} hover:shadow-lg text-white font-semibold py-3 rounded-lg transition-all duration-200 disabled:opacity-50 flex items-center justify-center gap-2 mt-6`}
               >
-                <span className="material-symbols-outlined">queue</span>
-                {loading ? 'Scheduling & Adding to Queue...' : 'Schedule & Add to OPD Queue'}
+                <span className="material-symbols-outlined">
+                  {formData.is_emergency ? 'emergency' : 'queue'}
+                </span>
+                {loading 
+                  ? (formData.is_emergency ? 'Scheduling Emergency...' : 'Scheduling & Adding to Queue...') 
+                  : (formData.is_emergency ? 'Schedule Emergency & Add to ICU' : 'Schedule & Add to OPD Queue')
+                }
               </button>
             </form>
           </div>

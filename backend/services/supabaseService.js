@@ -193,6 +193,7 @@ export class SupabaseService {
         status: "scheduled",
         token_number: tokenNumber,
         notes: patientDetails.notes || "",
+        is_emergency: patientDetails.isEmergency || false,
         created_at: new Date().toISOString(),
         updated_at: new Date().toISOString(),
       };
@@ -222,12 +223,16 @@ export class SupabaseService {
       const appointment = data[0];
       console.log("Appointment created successfully:", appointment);
 
-      // Step 5: Add to OPD queue (optional - don't fail if this fails)
+      // Step 5: Add to appropriate queue based on emergency status
       try {
-        await this.addToOPDQueue(appointment);
+        if (patientDetails.isEmergency) {
+          await this.addToICUQueue(appointment);
+        } else {
+          await this.addToOPDQueue(appointment);
+        }
       } catch (queueError) {
         console.warn(
-          "Warning: Failed to add to OPD queue:",
+          "Warning: Failed to add to queue:",
           queueError.message
         );
         // Continue - appointment is still created
@@ -387,6 +392,39 @@ export class SupabaseService {
     } catch (error) {
       console.error("OPD Queue Error:", error);
       throw error; // Re-throw to handle in calling function
+    }
+  }
+
+  async addToICUQueue(appointment) {
+    try {
+      const icuQueueEntry = {
+        patient_token: appointment.token_number,
+        patient_name: appointment.patient_name,
+        diseases: appointment.disease,
+        doctor_id: appointment.doctor_id,
+        is_emergency: true,
+        severity: "critical",
+        status: "waiting",
+        time: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      console.log("Adding to ICU queue:", icuQueueEntry);
+
+      const { error: insertError } = await supabase
+        .from("icu_queue")
+        .insert([icuQueueEntry]);
+
+      if (insertError) {
+        console.error("Error adding to ICU queue:", insertError);
+        throw insertError;
+      }
+
+      console.log("Successfully added to ICU queue");
+    } catch (error) {
+      console.error("ICU Queue Error:", error);
+      throw error;
     }
   }
 

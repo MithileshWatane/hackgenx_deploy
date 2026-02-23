@@ -47,7 +47,8 @@ export default function PatientDashboard() {
     email: '',
     appointment_date: '',
     doctor_id: '',
-    notes: ''
+    notes: '',
+    is_emergency: false
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -56,6 +57,54 @@ export default function PatientDashboard() {
   const [doctors, setDoctors] = useState([]);
   const [appointmentsHistory, setAppointmentsHistory] = useState([]);
   const [activeTab, setActiveTab] = useState('book'); // 'book' or 'history'
+
+  const fetchHistory = async () => {
+    if (!user?.email) return;
+    try {
+      console.log('Fetching appointment history for:', user.email);
+      
+      // Fetch appointments for the current patient using their email
+      const { data: appointments, error: apptError } = await supabase
+        .from('appointments')
+        .select('*')
+        .eq('email', user.email)
+        .order('created_at', { ascending: false });
+
+      if (apptError) {
+        console.error('Supabase error:', apptError);
+        throw apptError;
+      }
+      
+      console.log('Fetched appointments:', appointments);
+      
+      // If we have appointments, fetch doctor information separately
+      if (appointments && appointments.length > 0) {
+        const doctorIds = [...new Set(appointments.map(appt => appt.doctor_id).filter(Boolean))];
+        
+        if (doctorIds.length > 0) {
+          const { data: doctors } = await supabase
+            .from('user_profiles')
+            .select('id, name, email')
+            .in('id', doctorIds);
+          
+          // Map doctor information to appointments
+          const appointmentsWithDoctors = appointments.map(appt => ({
+            ...appt,
+            doctor: doctors?.find(doc => doc.id === appt.doctor_id)
+          }));
+          
+          setAppointmentsHistory(appointmentsWithDoctors);
+        } else {
+          setAppointmentsHistory(appointments);
+        }
+      } else {
+        setAppointmentsHistory([]);
+      }
+    } catch (err) {
+      console.error('Error fetching history:', err);
+      setError('Failed to load medical history: ' + err.message);
+    }
+  };
 
   useEffect(() => {
     const fetchDoctors = async () => {
@@ -72,54 +121,6 @@ export default function PatientDashboard() {
       }
     };
 
-    const fetchHistory = async () => {
-      if (!user?.email) return;
-      try {
-        console.log('Fetching appointment history for:', user.email);
-        
-        // First fetch appointments for the current patient
-        const { data: appointments, error: apptError } = await supabase
-          .from('appointments')
-          .select('*')
-          .eq('email', user.email)
-          .order('created_at', { ascending: false });
-
-        if (apptError) {
-          console.error('Supabase error:', apptError);
-          throw apptError;
-        }
-        
-        console.log('Fetched appointments:', appointments);
-        
-        // If we have appointments, fetch doctor information separately
-        if (appointments && appointments.length > 0) {
-          const doctorIds = [...new Set(appointments.map(appt => appt.doctor_id).filter(Boolean))];
-          
-          if (doctorIds.length > 0) {
-            const { data: doctors } = await supabase
-              .from('user_profiles')
-              .select('id, name, email')
-              .in('id', doctorIds);
-            
-            // Map doctor information to appointments
-            const appointmentsWithDoctors = appointments.map(appt => ({
-              ...appt,
-              doctor: doctors?.find(doc => doc.id === appt.doctor_id)
-            }));
-            
-            setAppointmentsHistory(appointmentsWithDoctors);
-          } else {
-            setAppointmentsHistory(appointments);
-          }
-        } else {
-          setAppointmentsHistory([]);
-        }
-      } catch (err) {
-        console.error('Error fetching history:', err);
-        setError('Failed to load medical history: ' + err.message);
-      }
-    };
-
     fetchDoctors();
     fetchHistory();
   }, [user?.email]);
@@ -132,8 +133,11 @@ export default function PatientDashboard() {
   };
 
   const handleInputChange = (e) => {
-    const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: value }));
+    const { name, value, type, checked } = e.target;
+    setFormData(prev => ({ 
+      ...prev, 
+      [name]: type === 'checkbox' ? checked : value 
+    }));
   };
 
   const handleSubmit = async (e) => {
@@ -154,13 +158,7 @@ export default function PatientDashboard() {
     try {
       setLoading(true);
 
-      // Step 1 – Compute real moving average and next queue position for the selected doctor
-      const [estimatedWait, queuePosition] = await Promise.all([
-        computeMovingAverage(formData.doctor_id),
-        getNextQueuePosition(formData.doctor_id),
-      ]);
-
-      // Step 2 – Insert appointment
+      // Step 1 – Insert appointment
       const { data: apptData, error: apptError } = await supabase
         .from('appointments')
         .insert([{
@@ -172,41 +170,72 @@ export default function PatientDashboard() {
           appointment_date: formData.appointment_date,
           doctor_id: formData.doctor_id,
           notes: formData.notes,
-          status: 'scheduled'
+          status: 'scheduled',
+          is_emergency: formData.is_emergency
         }])
         .select();
 
       if (apptError) throw apptError;
 
       const appointment = apptData?.[0];
-      const tokenNumber = appointment?.token_number || `OPD-${queuePosition}`;
 
-      // Step 3 – Add patient to OPD queue with real wait time
-      const { error: opdError } = await supabase
-        .from('opd_queue')
-        .insert([{
-          appointment_id: appointment.id,
-          patient_name: formData.patient_name,
-          disease: formData.disease,
-          token_number: tokenNumber,
-          doctor_id: formData.doctor_id,
-          queue_position: queuePosition,
-          status: 'waiting',
-          estimated_wait_minutes: estimatedWait,
-          entered_queue_at: new Date().toISOString(),
-        }]);
+      // Step 2 – Check if emergency patient
+      if (formData.is_emergency) {
+        // Add directly to ICU queue
+        const tokenNumber = appointment?.token_number || `ICU-${Date.now()}`;
+        
+        const { error: icuError } = await supabase
+          .from('icu_queue')
+          .insert([{
+            patient_token: tokenNumber,
+            patient_name: formData.patient_name,
+            diseases: formData.disease,
+            doctor_id: formData.doctor_id,
+            is_emergency: true,
+            status: 'waiting',
+            severity: 'critical',
+            created_at: new Date().toISOString(),
+          }]);
 
-      if (opdError) throw opdError;
+        if (icuError) throw icuError;
 
-      setQueueInfo({ position: queuePosition, estimatedWait: estimatedWait, token: tokenNumber });
-      setSuccess(`Appointment booked successfully!`);
+        setQueueInfo({ token: tokenNumber, isEmergency: true });
+        setSuccess(`Emergency appointment booked! You have been added directly to ICU Queue.`);
+      } else {
+        // Regular flow - compute moving average and add to OPD queue
+        const [estimatedWait, queuePosition] = await Promise.all([
+          computeMovingAverage(formData.doctor_id),
+          getNextQueuePosition(formData.doctor_id),
+        ]);
+
+        const tokenNumber = appointment?.token_number || `OPD-${queuePosition}`;
+
+        const { error: opdError } = await supabase
+          .from('opd_queue')
+          .insert([{
+            appointment_id: appointment.id,
+            patient_name: formData.patient_name,
+            disease: formData.disease,
+            token_number: tokenNumber,
+            doctor_id: formData.doctor_id,
+            queue_position: queuePosition,
+            status: 'waiting',
+            estimated_wait_minutes: estimatedWait,
+            entered_queue_at: new Date().toISOString(),
+          }]);
+
+        if (opdError) throw opdError;
+
+        setQueueInfo({ position: queuePosition, estimatedWait: estimatedWait, token: tokenNumber });
+        setSuccess(`Appointment booked successfully!`);
+      }
 
       // Refresh history
       await fetchHistory();
 
       setFormData({
         patient_name: '', age: '', disease: '', phone: '',
-        email: user?.email || '', appointment_date: '', doctor_id: '', notes: ''
+        email: user?.email || '', appointment_date: '', doctor_id: '', notes: '', is_emergency: false
       });
     } catch (err) {
       setError('Failed to schedule appointment: ' + err.message);
@@ -295,11 +324,15 @@ export default function PatientDashboard() {
                 {/* Queue Success Banner */}
                 {success && queueInfo && (
                   <div className="mb-8 rounded-2xl overflow-hidden shadow-lg border border-green-200 animate-in slide-in-from-top duration-500">
-                    <div className="bg-gradient-to-r from-green-500 to-emerald-600 px-6 py-4 flex items-center gap-3">
-                      <span className="material-symbols-outlined text-white text-3xl">check_circle</span>
+                    <div className={`${queueInfo.isEmergency ? 'bg-gradient-to-r from-red-500 to-red-600' : 'bg-gradient-to-r from-green-500 to-emerald-600'} px-6 py-4 flex items-center gap-3`}>
+                      <span className="material-symbols-outlined text-white text-3xl">
+                        {queueInfo.isEmergency ? 'emergency' : 'check_circle'}
+                      </span>
                       <div>
                         <p className="text-white font-bold text-lg">{success}</p>
-                        <p className="text-green-100 text-sm">You are now in the live OPD priority queue</p>
+                        <p className={`${queueInfo.isEmergency ? 'text-red-100' : 'text-green-100'} text-sm`}>
+                          {queueInfo.isEmergency ? 'Emergency patient prioritized for ICU' : 'You are now in the live OPD priority queue'}
+                        </p>
                       </div>
                     </div>
                     <div className="bg-white px-6 py-6 grid grid-cols-3 gap-4">
@@ -307,14 +340,30 @@ export default function PatientDashboard() {
                         <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Token ID</p>
                         <p className="text-xl font-black text-[#2b8cee]">{queueInfo.token}</p>
                       </div>
-                      <div className="text-center p-4 bg-slate-50 rounded-2xl border border-slate-100">
-                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Queue Post</p>
-                        <p className="text-2xl font-black text-slate-900">#{queueInfo.position}</p>
-                      </div>
-                      <div className="text-center p-4 bg-amber-50 rounded-2xl border border-amber-100">
-                        <p className="text-[10px] font-bold text-amber-600 uppercase tracking-wider mb-1">Approx. Wait</p>
-                        <p className="text-2xl font-black text-amber-700">{queueInfo.estimatedWait} min</p>
-                      </div>
+                      {!queueInfo.isEmergency && (
+                        <>
+                          <div className="text-center p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Queue Post</p>
+                            <p className="text-2xl font-black text-slate-900">#{queueInfo.position}</p>
+                          </div>
+                          <div className="text-center p-4 bg-amber-50 rounded-2xl border border-amber-100">
+                            <p className="text-[10px] font-bold text-amber-600 uppercase tracking-wider mb-1">Approx. Wait</p>
+                            <p className="text-2xl font-black text-amber-700">{queueInfo.estimatedWait} min</p>
+                          </div>
+                        </>
+                      )}
+                      {queueInfo.isEmergency && (
+                        <>
+                          <div className="text-center p-4 bg-red-50 rounded-2xl border border-red-200">
+                            <p className="text-[10px] font-bold text-red-600 uppercase tracking-wider mb-1">Priority</p>
+                            <p className="text-2xl font-black text-red-700">EMERGENCY</p>
+                          </div>
+                          <div className="text-center p-4 bg-red-50 rounded-2xl border border-red-200">
+                            <p className="text-[10px] font-bold text-red-600 uppercase tracking-wider mb-1">Queue Type</p>
+                            <p className="text-2xl font-black text-red-700">ICU</p>
+                          </div>
+                        </>
+                      )}
                     </div>
                   </div>
                 )}
@@ -453,17 +502,40 @@ export default function PatientDashboard() {
                     />
                   </div>
 
+                  <div className="flex items-center gap-3 p-4 bg-red-50 border-2 border-red-200 rounded-xl">
+                    <input
+                      type="checkbox"
+                      id="is_emergency"
+                      name="is_emergency"
+                      checked={formData.is_emergency}
+                      onChange={handleInputChange}
+                      className="w-5 h-5 text-red-600 border-red-300 rounded focus:ring-red-500 focus:ring-2 cursor-pointer"
+                    />
+                    <label htmlFor="is_emergency" className="flex items-center gap-2 cursor-pointer flex-1">
+                      <span className="material-symbols-outlined text-red-600 text-2xl">emergency</span>
+                      <div>
+                        <p className="text-sm font-bold text-red-700">Emergency Patient</p>
+                        <p className="text-xs text-red-600">Skip OPD queue and add directly to ICU queue</p>
+                      </div>
+                    </label>
+                  </div>
+
                   <button
                     type="submit"
                     disabled={loading}
-                    className="w-full bg-gradient-to-r from-[#2b8cee] to-[#1a73e8] hover:shadow-lg hover:from-[#1a73e8] hover:to-[#174ea6] text-white font-bold py-4 rounded-xl transition-all duration-300 disabled:opacity-50 flex items-center justify-center gap-3 shadow-md shadow-blue-200 text-lg"
+                    className={`w-full ${formData.is_emergency ? 'bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 shadow-red-200' : 'bg-gradient-to-r from-[#2b8cee] to-[#1a73e8] hover:from-[#1a73e8] hover:to-[#174ea6] shadow-blue-200'} hover:shadow-lg text-white font-bold py-4 rounded-xl transition-all duration-300 disabled:opacity-50 flex items-center justify-center gap-3 shadow-md text-lg`}
                   >
                     {loading ? (
                       <span className="material-symbols-outlined animate-spin">progress_activity</span>
                     ) : (
-                      <span className="material-symbols-outlined">send</span>
+                      <span className="material-symbols-outlined">
+                        {formData.is_emergency ? 'emergency' : 'send'}
+                      </span>
                     )}
-                    {loading ? 'Processing...' : 'Confirm Booking & Join Queue'}
+                    {loading 
+                      ? 'Processing...' 
+                      : (formData.is_emergency ? 'Book Emergency & Add to ICU' : 'Confirm Booking & Join Queue')
+                    }
                   </button>
                 </form>
               </div>

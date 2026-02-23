@@ -382,6 +382,12 @@ export default function ICUQueuePage() {
             p.patient_token?.toLowerCase().includes(q) ||
             p.diseases?.toLowerCase().includes(q)
         );
+    }).sort((a, b) => {
+        // Sort emergency patients to the top
+        if (a.is_emergency && !b.is_emergency) return -1;
+        if (!a.is_emergency && b.is_emergency) return 1;
+        // Then sort by time (most recent first)
+        return new Date(b.time) - new Date(a.time);
     });
 
     const FILTERS = [
@@ -549,14 +555,37 @@ export default function ICUQueuePage() {
                                 <tbody className="divide-y divide-slate-100">
                                     {filtered.map((p) => (
                                         <React.Fragment key={p.id}>
-                                            <tr className={`transition-colors ${p.status === 'assigned' ? 'bg-emerald-50/30' : 'hover:bg-slate-50'}`}>
+                                            <tr className={`transition-colors ${
+                                                p.is_emergency 
+                                                    ? 'bg-red-50 border-l-4 border-l-red-500' 
+                                                    : p.status === 'assigned' 
+                                                        ? 'bg-emerald-50/30' 
+                                                        : 'hover:bg-slate-50'
+                                            }`}>
                                                 <td className="px-4 py-3">
                                                     <div className="flex items-center gap-3">
-                                                        <div className="h-10 w-10 rounded-full bg-gradient-to-br from-red-100 to-red-50 flex items-center justify-center text-red-600 font-bold text-sm">
+                                                        <div className={`h-10 w-10 rounded-full ${
+                                                            p.is_emergency 
+                                                                ? 'bg-gradient-to-br from-red-500 to-red-600 text-white' 
+                                                                : 'bg-gradient-to-br from-red-100 to-red-50 text-red-600'
+                                                        } flex items-center justify-center font-bold text-sm relative`}>
+                                                            {p.is_emergency && (
+                                                                <span className="absolute -top-1 -right-1 flex h-3 w-3">
+                                                                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                                                                    <span className="relative inline-flex rounded-full h-3 w-3 bg-red-500"></span>
+                                                                </span>
+                                                            )}
                                                             {p.patient_name.charAt(0).toUpperCase()}
                                                         </div>
                                                         <div>
-                                                            <div className="font-bold text-slate-900 text-sm">{p.patient_name}</div>
+                                                            <div className="flex items-center gap-2">
+                                                                <span className="font-bold text-slate-900 text-sm">{p.patient_name}</span>
+                                                                {p.is_emergency && (
+                                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-red-600 text-white text-[10px] font-bold rounded-full animate-pulse">
+                                                                        EMERGENCY
+                                                                    </span>
+                                                                )}
+                                                            </div>
                                                             <div className="font-mono text-xs text-slate-500 bg-slate-100 px-2 py-0.5 rounded w-fit mt-1">{p.patient_token || p.id.slice(0, 8)}</div>
                                                         </div>
                                                     </div>
