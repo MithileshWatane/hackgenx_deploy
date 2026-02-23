@@ -17,7 +17,7 @@ export function AuthProvider({ children }) {
     const getSession = async () => {
       try {
         const { data: { session } } = await supabase.auth.getSession()
-        
+
         if (session) {
           setUser(session.user)
           // Get role from user metadata
@@ -57,7 +57,7 @@ export function AuthProvider({ children }) {
     return () => subscription.unsubscribe()
   }, [])
 
-  const signUp = async (email, password, role, addressData) => {
+  const signUp = async (email, password, role, name, addressData) => {
     try {
       const { data, error } = await supabase.auth.signUp({
         email,
@@ -65,6 +65,7 @@ export function AuthProvider({ children }) {
         options: {
           data: {
             role: role,
+            name: name,
             ...addressData
           }
         }
@@ -81,6 +82,7 @@ export function AuthProvider({ children }) {
       if (data.user) {
         const updateData = {
           role: role,
+          name: name,
           street: addressData?.street,
           city: addressData?.city,
           state: addressData?.state,
@@ -95,7 +97,7 @@ export function AuthProvider({ children }) {
           .from('user_profiles')
           .update(updateData)
           .eq('id', data.user.id)
-        
+
         if (updateError) {
           console.error('Error updating profile with address:', updateError)
         }

@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { MapContainer, TileLayer, Marker, useMapEvents } from 'react-leaflet';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
@@ -36,8 +36,8 @@ function LocationMarker({ position, onPositionChange }) {
     });
 
     return position ? (
-        <Marker 
-            position={position} 
+        <Marker
+            position={position}
             icon={hospitalIcon}
             draggable={true}
             eventHandlers={{
@@ -50,10 +50,24 @@ function LocationMarker({ position, onPositionChange }) {
         />
     ) : null;
 }
+
+// Helper component to recenter map when position changes via button
+import { useMap } from 'react-leaflet';
+function RecenterMap({ position }) {
+    const map = useMap();
+    useEffect(() => {
+        if (position) {
+            map.setView([position.lat, position.lng], map.getZoom());
+        }
+    }, [position, map]);
+    return null;
+}
+
 export default function MapLocationPicker({ onLocationSelect, initialLocation = null }) {
     // Default to Mumbai if no initial location
     const defaultLocation = { lat: 19.0760, lng: 72.8777 };
     const [position, setPosition] = useState(initialLocation || defaultLocation);
+    const [locating, setLocating] = useState(false);
 
     // Common hospital locations in India for quick selection
     const PRESET_LOCATIONS = useMemo(() => [
@@ -62,21 +76,35 @@ export default function MapLocationPicker({ onLocationSelect, initialLocation = 
         { name: 'Bangalore', lat: 12.9716, lng: 77.5946 },
         { name: 'Chennai', lat: 13.0827, lng: 80.2707 },
         { name: 'Hyderabad', lat: 17.3850, lng: 78.4867 },
-        { name: 'Pune', lat: 18.5204, lng: 73.8567 },
-        { name: 'Ahmedabad', lat: 23.0225, lng: 72.5714 },
-        { name: 'Kolkata', lat: 22.5726, lng: 88.3639 },
-        { name: 'Jaipur', lat: 26.9124, lng: 75.7873 },
-        { name: 'Lucknow', lat: 26.8467, lng: 80.9462 },
-        { name: 'Kanpur', lat: 26.4499, lng: 80.3319 },
-        { name: 'Nagpur', lat: 21.1458, lng: 79.0882 },
-        { name: 'Indore', lat: 22.7196, lng: 75.8577 },
-        { name: 'Thane', lat: 19.2183, lng: 72.9781 },
-        { name: 'Bhopal', lat: 23.2599, lng: 77.4126 },
     ], []);
 
     const handlePositionChange = (newPosition) => {
         setPosition(newPosition);
         onLocationSelect?.(newPosition);
+    };
+
+    const getCurrentLocation = () => {
+        setLocating(true);
+        if (navigator.geolocation) {
+            navigator.geolocation.getCurrentPosition(
+                (pos) => {
+                    const newPos = {
+                        lat: pos.coords.latitude,
+                        lng: pos.coords.longitude
+                    };
+                    handlePositionChange(newPos);
+                    setLocating(false);
+                },
+                (error) => {
+                    console.error("Error getting location:", error);
+                    alert("Could not get current location. Please ensure location permissions are granted.");
+                    setLocating(false);
+                }
+            );
+        } else {
+            alert("Geolocation is not supported by your browser.");
+            setLocating(false);
+        }
     };
 
     const handleManualInput = (field, value) => {
@@ -90,9 +118,22 @@ export default function MapLocationPicker({ onLocationSelect, initialLocation = 
 
     return (
         <div className="space-y-4">
-            {/* Quick Location Presets */}
-            <div className="flex flex-wrap gap-2">
-                <span className="text-xs font-semibold text-slate-500 uppercase self-center">Quick Select:</span>
+            {/* Quick Location Presets & Current Location */}
+            <div className="flex flex-wrap gap-2 items-center">
+                <span className="text-xs font-semibold text-slate-500 uppercase self-center">Location:</span>
+
+                <button
+                    type="button"
+                    onClick={getCurrentLocation}
+                    disabled={locating}
+                    className="flex items-center gap-1.6 px-2.5 py-1.5 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors shadow-sm font-medium disabled:bg-blue-400"
+                >
+                    <span className="material-symbols-outlined text-[16px]">my_location</span>
+                    {locating ? 'Locating...' : 'Use Current Location'}
+                </button>
+
+                <div className="h-4 w-px bg-slate-200 mx-1" />
+
                 {PRESET_LOCATIONS.map((loc) => (
                     <button
                         key={loc.name}
@@ -118,13 +159,14 @@ export default function MapLocationPicker({ onLocationSelect, initialLocation = 
                             attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
                             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                         />
-                        <LocationMarker 
-                            position={[position.lat, position.lng]} 
+                        <LocationMarker
+                            position={[position.lat, position.lng]}
                             onPositionChange={handlePositionChange}
                         />
+                        <RecenterMap position={position} />
                     </MapContainer>
                 </div>
-                
+
                 {/* Map Instructions Overlay */}
                 <div className="absolute bottom-2 left-1/2 -translate-x-1/2 bg-white/90 px-4 py-2 rounded-full text-xs text-slate-600 shadow-lg backdrop-blur-sm border border-slate-200 z-[1000]">
                     Click anywhere on map or drag marker to set location

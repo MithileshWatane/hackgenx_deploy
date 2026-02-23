@@ -7,18 +7,19 @@ export default function SignUp() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
-  const [role, setRole] = useState('')
+  const [role, setRole] = useState('doctor')
   const [street, setStreet] = useState('')
   const [city, setCity] = useState('')
   const [state, setState] = useState('')
+  const [name, setName] = useState('')
   const [zipCode, setZipCode] = useState('')
   const [country, setCountry] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
-  
+
   // Doctor location coordinates
   const [doctorLocation, setDoctorLocation] = useState({ lat: 19.0760, lng: 72.8777 });
-  
+
   const { signUp } = useAuth()
   const navigate = useNavigate()
 
@@ -46,7 +47,7 @@ export default function SignUp() {
       return
     }
 
-    const { error } = await signUp(email, password, role, {
+    const { error } = await signUp(email, password, role, name, {
       street,
       city,
       state,
@@ -56,16 +57,16 @@ export default function SignUp() {
       latitude: role === 'doctor' ? doctorLocation.lat : null,
       longitude: role === 'doctor' ? doctorLocation.lng : null
     })
-    
+
     if (error) {
       setError(error.message)
     } else {
       // Show success message and redirect to sign in
-      navigate('/signin', { 
+      navigate('/signin', {
         state: { message: 'Account created successfully! Please sign in.' }
       })
     }
-    
+
     setLoading(false)
   }
 
@@ -85,7 +86,7 @@ export default function SignUp() {
             Join our healthcare platform
           </p>
         </div>
-        
+
         <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
           <div className="space-y-4">
             <div>
@@ -96,11 +97,10 @@ export default function SignUp() {
                 <button
                   type="button"
                   onClick={() => setRole('doctor')}
-                  className={`flex items-center justify-center rounded-lg border px-4 py-3 text-sm font-medium transition-colors ${
-                    role === 'doctor'
-                      ? 'border-[#2b8cee] bg-[#2b8cee]/10 text-[#2b8cee]'
-                      : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
-                  }`}
+                  className={`flex items-center justify-center rounded-lg border px-4 py-3 text-sm font-medium transition-colors ${role === 'doctor'
+                    ? 'border-[#2b8cee] bg-[#2b8cee]/10 text-[#2b8cee]'
+                    : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+                    }`}
                 >
                   <span className="material-symbols-outlined mr-2">stethoscope</span>
                   Doctor
@@ -108,11 +108,10 @@ export default function SignUp() {
                 <button
                   type="button"
                   onClick={() => setRole('patient')}
-                  className={`flex items-center justify-center rounded-lg border px-4 py-3 text-sm font-medium transition-colors ${
-                    role === 'patient'
-                      ? 'border-[#2b8cee] bg-[#2b8cee]/10 text-[#2b8cee]'
-                      : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
-                  }`}
+                  className={`flex items-center justify-center rounded-lg border px-4 py-3 text-sm font-medium transition-colors ${role === 'patient'
+                    ? 'border-[#2b8cee] bg-[#2b8cee]/10 text-[#2b8cee]'
+                    : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+                    }`}
                 >
                   <span className="material-symbols-outlined mr-2">person</span>
                   Patient
@@ -124,7 +123,23 @@ export default function SignUp() {
                 </p>
               )}
             </div>
-            
+
+            <div>
+              <label htmlFor="name" className="block text-sm font-medium text-slate-700">
+                Full Name
+              </label>
+              <input
+                id="name"
+                name="name"
+                type="text"
+                required
+                className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-slate-900 placeholder-slate-400 focus:border-[#2b8cee] focus:outline-none focus:ring-2 focus:ring-[#2b8cee]/20"
+                placeholder="Enter your full name"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+              />
+            </div>
+
             <div>
               <label htmlFor="email" className="block text-sm font-medium text-slate-700">
                 Email address
@@ -141,7 +156,7 @@ export default function SignUp() {
                 onChange={(e) => setEmail(e.target.value)}
               />
             </div>
-            
+
             <div>
               <label htmlFor="password" className="block text-sm font-medium text-slate-700">
                 Password
@@ -181,7 +196,7 @@ export default function SignUp() {
                 <span className="material-symbols-outlined text-[#2b8cee]">home</span>
                 Address Information
               </h3>
-              
+
               {/* Map Location Picker - Only for Doctors */}
               {role === 'doctor' && (
                 <div className="mb-6 p-4 bg-blue-50/50 rounded-xl border border-blue-100">
@@ -192,13 +207,13 @@ export default function SignUp() {
                   <p className="text-xs text-slate-500 mb-4">
                     Select your hospital location on the map. This helps patients find nearby healthcare facilities.
                   </p>
-                  <MapLocationPicker 
+                  <MapLocationPicker
                     onLocationSelect={setDoctorLocation}
                     initialLocation={doctorLocation}
                   />
                 </div>
               )}
-              
+
               <div className="space-y-4">
                 <div>
                   <label htmlFor="street" className="block text-sm font-medium text-slate-700">
