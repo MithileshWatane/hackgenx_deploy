@@ -107,10 +107,15 @@ function AssignBedModal({ patient, onClose, onAssign, assigning }) {
         const fetchAvailableBeds = async () => {
             setLoadingBeds(true);
             try {
+                // Get current user
+                const { data: { user } } = await supabase.auth.getUser();
+                
+                // Fetch only beds belonging to current doctor
                 const { data, error: fetchError } = await supabase
                     .from('beds')
                     .select('*')
                     .eq('status', 'available')
+                    .eq('doctor_id', user?.id)  // Filter by doctor
                     .order('bed_number', { ascending: true });
 
                 if (fetchError) throw fetchError;
@@ -384,9 +389,9 @@ export default function BedQueuePage() {
 
             await fetchBedQueue();
 
-            // After discharge, try to auto-assign freed bed to the oldest waiting patient
+            // After discharge, try to auto-assign freed bed to the oldest waiting patient of this doctor
             if (newStatus === 'discharged' && entry.bed_id) {
-                const result = await assignSinglePatient();
+                const result = await assignSinglePatient(user?.id);
                 if (result.assigned > 0) {
                     await fetchBedQueue(); // Refresh to show new assignments
                     alert(`✅ ${result.message}`);

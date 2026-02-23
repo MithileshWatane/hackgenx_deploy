@@ -7,17 +7,25 @@ import { supabase } from '../lib/supabase';
  * @param {string} queueEntryId - The bed_queue entry ID
  * @param {string} patientName - Patient name for logging
  * @param {string} bedType - Type of bed required (default: 'general')
+ * @param {string} doctorId - The doctor ID to filter beds by
  * @returns {Object} - { success: boolean, bedAssigned: boolean, bed?: object, waitTimeMinutes?: number, message: string }
  */
-export async function autoAssignBed(queueEntryId, patientName, bedType = 'general') {
+export async function autoAssignBed(queueEntryId, patientName, bedType = 'general', doctorId = null) {
     try {
-        // 1. Fetch available beds of the requested type
-        const { data: availableBeds, error: bedError } = await supabase
+        // 1. Fetch available beds of the requested type, filtered by doctor
+        let bedQuery = supabase
             .from('beds')
             .select('*')
             .eq('status', 'available')
             .eq('bed_type', bedType)
             .order('bed_number', { ascending: true });
+        
+        // Filter by doctor if provided
+        if (doctorId) {
+            bedQuery = bedQuery.eq('doctor_id', doctorId);
+        }
+        
+        const { data: availableBeds, error: bedError } = await bedQuery;
 
         if (bedError) throw bedError;
 
@@ -230,20 +238,27 @@ async function calculateEstimatedWaitTime(bedType = 'general', queuePosition = 0
 }
 
 /**
- * Assigns a single bed to the oldest waiting patient.
+ * Assigns a single bed to the oldest waiting patient for the specified doctor.
  * Use this when a specific bed becomes available (e.g., after discharge).
  * 
+ * @param {string} doctorId - The doctor ID to filter by
  * @returns {Object} - Assignment result
  */
-export async function assignSinglePatient() {
+export async function assignSinglePatient(doctorId = null) {
     try {
-        // Fetch the oldest waiting patient
-        const { data: waitingPatients, error } = await supabase
+        // Fetch the oldest waiting patient for this doctor
+        let patientQuery = supabase
             .from('bed_queue')
             .select('*')
             .eq('status', 'waiting_for_bed')
             .order('admitted_from_opd_at', { ascending: true })
             .limit(1);
+        
+        if (doctorId) {
+            patientQuery = patientQuery.eq('doctor_id', doctorId);
+        }
+        
+        const { data: waitingPatients, error } = await patientQuery;
 
         if (error) throw error;
 
@@ -253,13 +268,19 @@ export async function assignSinglePatient() {
 
         const patient = waitingPatients[0];
 
-        // Fetch one available bed
-        const { data: availableBeds, error: bedError } = await supabase
+        // Fetch one available bed for this doctor
+        let bedQuery = supabase
             .from('beds')
             .select('*')
             .eq('status', 'available')
             .order('bed_number', { ascending: true })
             .limit(1);
+        
+        if (doctorId) {
+            bedQuery = bedQuery.eq('doctor_id', doctorId);
+        }
+        
+        const { data: availableBeds, error: bedError } = await bedQuery;
 
         if (bedError) throw bedError;
 
@@ -340,19 +361,26 @@ export async function assignSinglePatient() {
 }
 
 /**
- * Attempts to auto-assign beds to all waiting patients in the queue.
+ * Attempts to auto-assign beds to all waiting patients in the queue for the specified doctor.
  * Called when a bed becomes available (e.g., after discharge).
  * 
+ * @param {string} doctorId - The doctor ID to filter by
  * @returns {Object} - Assignment results
  */
-export async function processWaitingQueue() {
+export async function processWaitingQueue(doctorId = null) {
     try {
-        // Fetch all waiting patients ordered by admission time (FIFO)
-        const { data: waitingPatients, error } = await supabase
+        // Fetch all waiting patients ordered by admission time (FIFO), filtered by doctor
+        let patientQuery = supabase
             .from('bed_queue')
             .select('*')
             .eq('status', 'waiting_for_bed')
             .order('admitted_from_opd_at', { ascending: true });
+        
+        if (doctorId) {
+            patientQuery = patientQuery.eq('doctor_id', doctorId);
+        }
+        
+        const { data: waitingPatients, error } = await patientQuery;
 
         if (error) throw error;
 
@@ -360,12 +388,18 @@ export async function processWaitingQueue() {
             return { processed: 0, assigned: 0, message: 'No waiting patients' };
         }
 
-        // Fetch available beds
-        const { data: availableBeds, error: bedError } = await supabase
+        // Fetch available beds for this doctor
+        let bedQuery = supabase
             .from('beds')
             .select('*')
             .eq('status', 'available')
             .order('bed_number', { ascending: true });
+        
+        if (doctorId) {
+            bedQuery = bedQuery.eq('doctor_id', doctorId);
+        }
+        
+        const { data: availableBeds, error: bedError } = await bedQuery;
 
         if (bedError) throw bedError;
 

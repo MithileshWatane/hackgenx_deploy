@@ -70,11 +70,12 @@ export default function ShiftToICUModal({ patient, onClose, onShift }) {
             if (error) throw error;
             const queueEntry = insertedRows?.[0];
 
-            // 2. Fetch available ICU beds
+            // 2. Fetch available ICU beds for this doctor only
             const { data: availableBeds, error: bedError } = await supabase
                 .from('icu_beds')
                 .select('*')
-                .eq('is_available', true);
+                .eq('is_available', true)
+                .eq('doctor_id', user?.id);  // Filter by current doctor
 
             if (bedError) throw bedError;
 

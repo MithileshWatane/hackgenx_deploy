@@ -169,7 +169,7 @@ export default function ICUScheduling() {
       await loadBedsData();
 
       // After adding a new available bed, try to auto-assign to waiting patient
-      const result = await autoAssignICUBed();
+      const result = await autoAssignICUBed(user.id);
       if (result.assigned > 0) {
         await loadBedsData(); // Reload to show updated bed assignment
         alert(`✅ ${result.message}`);
@@ -250,8 +250,8 @@ export default function ICUScheduling() {
 
       if (queueError) throw queueError;
 
-      // 3. Try to auto-assign the freed bed to the oldest waiting patient
-      const result = await autoAssignICUBed();
+      // 3. Try to auto-assign the freed bed to the oldest waiting patient of this doctor
+      const result = await autoAssignICUBed(user.id);
       if (result.assigned > 0) {
         await loadBedsData();
         alert(`✅ ${patient.patient_name} discharged. ${result.message}`);

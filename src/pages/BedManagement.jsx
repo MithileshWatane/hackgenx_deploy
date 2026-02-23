@@ -232,7 +232,7 @@ function AddBedModal({ onClose, onAdd, user }) {
             if (insertError) throw insertError;
 
             // After adding a new available bed, try to auto-assign to waiting patient
-            const result = await assignSinglePatient();
+            const result = await assignSinglePatient(user?.id);
             if (result.assigned > 0) {
                 alert(`✅ ${result.message}`);
             }
@@ -405,7 +405,7 @@ export default function BedManagement() {
 
             // If bed is now available, try to auto-assign to the oldest waiting patient
             if (newStatus === 'available') {
-                const result = await assignSinglePatient();
+                const result = await assignSinglePatient(user?.id);
                 if (result.assigned > 0) {
                     alert(`✅ ${result.message}`);
                 }
@@ -442,7 +442,7 @@ export default function BedManagement() {
             if (queueError) throw queueError;
 
             // 3. Try to auto-assign the freed bed to the oldest waiting patient
-            const result = await assignSinglePatient();
+            const result = await assignSinglePatient(user?.id);
             if (result.assigned > 0) {
                 alert(`✅ ${result.message}`);
             }

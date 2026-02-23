@@ -86,20 +86,28 @@ const findBestBed = (availableBeds, patient) => {
 };
 
 /**
- * Auto-assigns a freed ICU bed to the oldest waiting patient.
+ * Auto-assigns a freed ICU bed to the oldest waiting patient of the specified doctor.
  * Called when an ICU patient is discharged or new bed is added.
  * 
+ * @param {string} doctorId - The doctor ID to filter by
  * @returns {Object} - Assignment result
  */
-export async function autoAssignICUBed() {
+export async function autoAssignICUBed(doctorId) {
     try {
-        // 1. Find the oldest waiting patient in ICU queue
-        const { data: waitingPatients, error } = await supabase
+        // 1. Find the oldest waiting patient in ICU queue for this doctor
+        let patientQuery = supabase
             .from('icu_queue')
             .select('*')
             .eq('status', 'waiting')
             .order('time', { ascending: true }) // Oldest first
             .limit(1);
+        
+        // Filter by doctor if provided
+        if (doctorId) {
+            patientQuery = patientQuery.eq('doctor_id', doctorId);
+        }
+        
+        const { data: waitingPatients, error } = await patientQuery;
 
         if (error) throw error;
 
@@ -109,11 +117,19 @@ export async function autoAssignICUBed() {
 
         const patient = waitingPatients[0];
 
-        // 2. Find available ICU beds
-        const { data: availableBeds, error: bedError } = await supabase
+        // 2. Find available ICU beds for this doctor
+        let bedQuery = supabase
             .from('icu_beds')
             .select('*')
             .eq('is_available', true);
+        
+        // Filter by doctor if provided - use patient's doctor or the passed doctorId
+        const bedDoctorId = doctorId || patient.doctor_id;
+        if (bedDoctorId) {
+            bedQuery = bedQuery.eq('doctor_id', bedDoctorId);
+        }
+        
+        const { data: availableBeds, error: bedError } = await bedQuery;
 
         if (bedError) throw bedError;
 
@@ -211,10 +227,12 @@ export default function ICUQueuePage() {
         if (!window.confirm(`Assign an ICU bed to ${patient.patient_name}?`)) return;
         setUpdatingId(patient.id);
         try {
+            // Only fetch available beds belonging to the current doctor
             const { data: availableBeds, error: bedError } = await supabase
                 .from('icu_beds')
                 .select('*')
-                .eq('is_available', true);
+                .eq('is_available', true)
+                .eq('doctor_id', user.id);  // Filter by current doctor
 
             if (bedError) throw bedError;
 
@@ -290,8 +308,8 @@ export default function ICUQueuePage() {
 
             if (queueError) throw queueError;
 
-            // 3. Try to auto-assign the freed bed to the oldest waiting patient
-            const result = await autoAssignICUBed();
+            // 3. Try to auto-assign the freed bed to the oldest waiting patient of this doctor
+            const result = await autoAssignICUBed(user.id);
             if (result.assigned > 0) {
                 alert(`✅ ${patient.patient_name} discharged. ${result.message}`);
             } else {
