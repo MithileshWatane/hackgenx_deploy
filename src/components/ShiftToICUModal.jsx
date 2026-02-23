@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext_simple';
 import NearbyHospitalsModal from './NearbyHospitalsModal';
+import { autoAssignBed } from '../services/autoBedAssignmentService';
 
 export default function ShiftToICUModal({ patient, onClose, onShift }) {
     const { user } = useAuth();
@@ -54,6 +55,165 @@ export default function ShiftToICUModal({ patient, onClose, onShift }) {
         return bestBed;
     };
 
+    /**
+     * Find an ICU patient with stable or improving condition who can be moved to regular bed.
+     * Returns the patient with the most recent daily round showing stable/improving status.
+     */
+    const findStablePatientForTransfer = async (doctorId) => {
+        try {
+            console.log('Finding stable patients for doctor:', doctorId);
+
+            // DEBUG: Check all daily rounds first
+            const { data: allRounds, error: allRoundsError } = await supabase
+                .from('daily_rounds')
+                .select('id, icu_queue_id, condition_status, created_at')
+                .limit(10);
+            console.log('DEBUG - All daily rounds sample:', allRounds, 'Error:', allRoundsError);
+
+            // Get all assigned ICU patients for this doctor
+            const { data: assignedPatients, error: patientsError } = await supabase
+                .from('icu_queue')
+                .select('id, patient_name, patient_token, doctor_id, assigned_bed_id, assigned_bed_label, diseases, ventilator_needed, dialysis_needed, severity')
+                .eq('status', 'assigned')
+                .eq('doctor_id', doctorId);
+
+            console.log('Assigned ICU patients:', assignedPatients, 'Error:', patientsError);
+
+            if (patientsError) {
+                console.error('Error fetching assigned patients:', patientsError);
+                return null;
+            }
+
+            if (!assignedPatients || assignedPatients.length === 0) {
+                console.log('No assigned ICU patients found for doctor:', doctorId);
+                return null;
+            }
+
+            console.log(`Found ${assignedPatients.length} assigned patients, checking daily rounds...`);
+
+            // For each patient, get their latest daily round
+            for (const patient of assignedPatients) {
+                console.log(`Checking rounds for patient ${patient.patient_name} (ID: ${patient.id})`);
+
+                const { data: rounds, error: roundsError } = await supabase
+                    .from('daily_rounds')
+                    .select('condition_status, created_at')
+                    .eq('icu_queue_id', patient.id)
+                    .order('created_at', { ascending: false })
+                    .limit(1);
+
+                console.log(`Daily rounds for ${patient.patient_name}:`, rounds, 'Error:', roundsError);
+
+                if (roundsError) {
+                    console.error(`Error fetching rounds for patient ${patient.id}:`, roundsError);
+                    continue;
+                }
+
+                if (!rounds || rounds.length === 0) {
+                    console.log(`No daily rounds found for patient ${patient.patient_name} (ID: ${patient.id})`);
+                    continue;
+                }
+
+                const latestRound = rounds[0];
+                console.log(`Latest round for ${patient.patient_name}: status=${latestRound.condition_status}`);
+
+                // Check if condition is stable or improving
+                if (latestRound.condition_status === 'stable' || latestRound.condition_status === 'improving') {
+                    console.log(`✅ FOUND stable/improving patient: ${patient.patient_name} (${latestRound.condition_status})`);
+                    return {
+                        ...patient,
+                        latest_condition: latestRound.condition_status,
+                        round_date: latestRound.created_at
+                    };
+                } else {
+                    console.log(`Patient ${patient.patient_name} has condition: ${latestRound.condition_status} - not eligible`);
+                }
+            }
+
+            console.log('No stable/improving patient found after checking all assigned patients');
+            return null;
+        } catch (err) {
+            console.error('Error finding stable patient:', err);
+            return null;
+        }
+    };
+
+    /**
+     * Transfer an ICU patient to the regular bed queue and free their ICU bed.
+     * Returns the freed ICU bed ID on success, null on failure.
+     */
+    const transferPatientToBedQueue = async (icuPatient) => {
+        try {
+            const now = new Date().toISOString();
+
+            // 1. Add patient to bed_queue
+            const { data: bedQueueEntry, error: queueError } = await supabase
+                .from('bed_queue')
+                .insert([{
+                    patient_name: icuPatient.patient_name,
+                    token_number: icuPatient.patient_token,
+                    disease: icuPatient.diseases,
+                    doctor_id: icuPatient.doctor_id,
+                    status: 'waiting_for_bed',
+                    bed_type: 'general',
+                    admitted_from_opd_at: now,
+                    notes: `Transferred from ICU Bed ${icuPatient.assigned_bed_label}. Condition: ${icuPatient.latest_condition}`
+                }])
+                .select()
+                .single();
+
+            if (queueError) {
+                console.error('Error adding to bed_queue:', queueError);
+                return null;
+            }
+
+            // Trigger auto bed assignment for the transferred patient (after 5s delay)
+            if (bedQueueEntry?.id) {
+                console.log('Will trigger auto bed assignment in 5 seconds for:', icuPatient.patient_name);
+                setTimeout(async () => {
+                    console.log('Triggering auto bed assignment for transferred patient:', icuPatient.patient_name);
+                    const autoAssignResult = await autoAssignBed(
+                        bedQueueEntry.id,
+                        icuPatient.patient_name,
+                        'general',
+                        icuPatient.doctor_id
+                    );
+                    console.log('Auto assignment result:', autoAssignResult);
+                }, 5000);
+            }
+
+            // 2. Update icu_queue status to discharged
+            const { error: icuUpdateError } = await supabase
+                .from('icu_queue')
+                .update({
+                    status: 'discharged',
+                    discharged_at: now
+                })
+                .eq('id', icuPatient.id);
+
+            if (icuUpdateError) {
+                console.error('Error updating icu_queue:', icuUpdateError);
+                return null;
+            }
+
+            // 3. Free the ICU bed - mark as available
+            const { error: bedError } = await supabase
+                .from('icu_beds')
+                .update({ is_available: true })
+                .eq('id', icuPatient.assigned_bed_id);
+
+            if (bedError) {
+                console.error('Error freeing ICU bed:', bedError);
+                return null;
+            }
+
+            return icuPatient.assigned_bed_id;
+        } catch (err) {
+            console.error('Error transferring patient:', err);
+            return null;
+        }
+    };
+
     const handleSubmit = async (e) => {
         e.preventDefault();
         setLoading(true);
@@ -83,6 +243,7 @@ export default function ShiftToICUModal({ patient, onClose, onShift }) {
             if (bedError) throw bedError;
 
             let assignedBed = null;
+            let reassignedFrom = null;
 
             if (availableBeds && availableBeds.length > 0) {
                 // 3. Run scheduling algorithm to find best bed
@@ -115,6 +276,58 @@ export default function ShiftToICUModal({ patient, onClose, onShift }) {
                         if (queueUpdateError) throw queueUpdateError;
                     }
                 }
+            } else if (formData.is_emergency) {
+                // EMERGENCY: No beds available - try to reassign from stable patient
+                console.log('Emergency patient - checking for stable patients to transfer...');
+                console.log('Current user ID:', user?.id);
+                const stablePatient = await findStablePatientForTransfer(user?.id);
+
+                if (stablePatient) {
+                    console.log('Found stable patient for transfer:', stablePatient.patient_name, 'Condition:', stablePatient.latest_condition);
+                    const freedBedId = await transferPatientToBedQueue(stablePatient);
+
+                    if (freedBedId) {
+                        // Re-fetch the now-available bed
+                        const { data: freedBed } = await supabase
+                            .from('icu_beds')
+                            .select('*')
+                            .eq('id', freedBedId)
+                            .single();
+
+                        if (freedBed) {
+                            assignedBed = freedBed;
+                            reassignedFrom = stablePatient;
+
+                            const admissionTime = new Date();
+                            const dischargeTime = new Date(admissionTime);
+                            dischargeTime.setDate(dischargeTime.getDate() + (formData.predicted_stay_days || 7));
+
+                            // Mark bed as occupied
+                            const { error: bedUpdateError } = await supabase
+                                .from('icu_beds')
+                                .update({ is_available: false })
+                                .eq('id', assignedBed.id);
+                            if (bedUpdateError) throw bedUpdateError;
+
+                            // Update emergency patient with assigned bed
+                            if (queueEntry?.id) {
+                                const { error: queueUpdateError } = await supabase
+                                    .from('icu_queue')
+                                    .update({
+                                        status: 'assigned',
+                                        assigned_bed_id: assignedBed.id,
+                                        assigned_bed_label: assignedBed.bed_id,
+                                        admission_time: admissionTime.toISOString(),
+                                        discharge_time: dischargeTime.toISOString()
+                                    })
+                                    .eq('id', queueEntry.id);
+                                if (queueUpdateError) throw queueUpdateError;
+                            }
+                        }
+                    }
+                } else {
+                    console.log('No stable/improving patient found for emergency reassignment');
+                }
             }
 
             setNoBedsAvailable(!assignedBed);
@@ -142,8 +355,12 @@ export default function ShiftToICUModal({ patient, onClose, onShift }) {
             }
 
             const message = assignedBed
-                ? `✅ ${formData.patient_name} assigned to ICU Bed ${assignedBed.bed_id}!\nEstimated discharge in ${formData.predicted_stay_days} days.`
-                : `📋 ${formData.patient_name} added to ICU waiting queue.\n\nNo ICU bed currently available in this hospital.\nCheck "Nearby Hospitals" for available beds in other facilities.`;
+                ? reassignedFrom
+                    ? `🚨 EMERGENCY: ${formData.patient_name} assigned to ICU Bed ${assignedBed.bed_id}!\n\nBed reassigned from ${reassignedFrom.patient_name} (condition: ${reassignedFrom.latest_condition}).\n${reassignedFrom.patient_name} moved to regular bed queue.`
+                    : `✅ ${formData.patient_name} assigned to ICU Bed ${assignedBed.bed_id}!\nEstimated discharge in ${formData.predicted_stay_days} days.`
+                : formData.is_emergency
+                    ? `🚨 EMERGENCY: ${formData.patient_name} added to ICU waiting queue.\n\nNo ICU beds available and no stable patients found for transfer.\nCheck "Nearby Hospitals" for available beds in other facilities.`
+                    : `📋 ${formData.patient_name} added to ICU waiting queue.\n\nNo ICU bed currently available in this hospital.\nCheck "Nearby Hospitals" for available beds in other facilities.`;
 
             alert(message);
             
@@ -225,6 +442,19 @@ export default function ShiftToICUModal({ patient, onClose, onShift }) {
                                 className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-red-500/20 focus:border-red-500 outline-none"
                             />
                         </div>
+                    </div>
+
+                    <div className="flex items-center gap-3 p-3 bg-amber-50 rounded-lg border border-amber-200">
+                        <input
+                            type="checkbox"
+                            id="is_emergency"
+                            checked={formData.is_emergency}
+                            onChange={e => setFormData({ ...formData, is_emergency: e.target.checked })}
+                            className="w-4 h-4 text-red-600 rounded border-slate-300 focus:ring-red-500"
+                        />
+                        <label htmlFor="is_emergency" className="text-sm font-semibold text-amber-800 cursor-pointer">
+                            🚨 Emergency Patient (High Priority - May trigger bed reassignment)
+                        </label>
                     </div>
 
                     <div className="grid grid-cols-2 gap-4">

@@ -279,7 +279,8 @@ export default function QueueDashboard() {
                 assignmentResult = await autoAssignBed(
                     insertedQueue[0].id,
                     queueEntry.patient_name,
-                    'general'
+                    'general',
+                    user?.id
                 );
             }
 
