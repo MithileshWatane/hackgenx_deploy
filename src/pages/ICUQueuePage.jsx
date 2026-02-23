@@ -85,6 +85,89 @@ const findBestBed = (availableBeds, patient) => {
     return bestBed;
 };
 
+/**
+ * Auto-assigns a freed ICU bed to the oldest waiting patient.
+ * Called when an ICU patient is discharged or new bed is added.
+ * 
+ * @returns {Object} - Assignment result
+ */
+export async function autoAssignICUBed() {
+    try {
+        // 1. Find the oldest waiting patient in ICU queue
+        const { data: waitingPatients, error } = await supabase
+            .from('icu_queue')
+            .select('*')
+            .eq('status', 'waiting')
+            .order('time', { ascending: true }) // Oldest first
+            .limit(1);
+
+        if (error) throw error;
+
+        if (!waitingPatients || waitingPatients.length === 0) {
+            return { assigned: 0, message: 'No waiting patients in ICU queue' };
+        }
+
+        const patient = waitingPatients[0];
+
+        // 2. Find available ICU beds
+        const { data: availableBeds, error: bedError } = await supabase
+            .from('icu_beds')
+            .select('*')
+            .eq('is_available', true);
+
+        if (bedError) throw bedError;
+
+        if (!availableBeds || availableBeds.length === 0) {
+            return { assigned: 0, message: 'No ICU beds available' };
+        }
+
+        // 3. Find the best compatible bed
+        const bestBed = findBestBed(availableBeds, patient);
+
+        if (!bestBed) {
+            return { assigned: 0, message: 'No compatible ICU bed for waiting patient' };
+        }
+
+        // 4. Assign the bed
+        const admissionTime = new Date();
+        const dischargeTime = new Date(admissionTime);
+        dischargeTime.setDate(dischargeTime.getDate() + (patient.predicted_stay_days || 7));
+
+        // Mark bed as occupied
+        const { error: bedUpdateError } = await supabase
+            .from('icu_beds')
+            .update({ is_available: false })
+            .eq('id', bestBed.id);
+
+        if (bedUpdateError) throw bedUpdateError;
+
+        // Update patient record
+        const { error: queueUpdateError } = await supabase
+            .from('icu_queue')
+            .update({
+                status: 'assigned',
+                assigned_bed_id: bestBed.id,
+                assigned_bed_label: bestBed.bed_id,
+                admission_time: admissionTime.toISOString(),
+                discharge_time: dischargeTime.toISOString(),
+            })
+            .eq('id', patient.id);
+
+        if (queueUpdateError) throw queueUpdateError;
+
+        return {
+            assigned: 1,
+            patient: patient.patient_name,
+            bed: bestBed.bed_id,
+            message: `${patient.patient_name} auto-assigned to ICU Bed ${bestBed.bed_id}`
+        };
+
+    } catch (error) {
+        console.error('Auto-assign ICU bed error:', error);
+        return { assigned: 0, message: `Error: ${error.message}` };
+    }
+}
+
 // ── Main Component ─────────────────────────────────────────────────────────────
 
 export default function ICUQueuePage() {
@@ -206,7 +289,14 @@ export default function ICUQueuePage() {
 
             if (queueError) throw queueError;
 
-            alert(`✅ ${patient.patient_name} has been discharged.`);
+            // 3. Try to auto-assign the freed bed to the oldest waiting patient
+            const result = await autoAssignICUBed();
+            if (result.assigned > 0) {
+                alert(`✅ ${patient.patient_name} discharged. ${result.message}`);
+            } else {
+                alert(`✅ ${patient.patient_name} has been discharged.`);
+            }
+
             fetchQueue();
         } catch (err) {
             console.error('Discharge error:', err);

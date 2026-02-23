@@ -10,6 +10,7 @@ import {
 } from "../services/bedService";
 import { supabase } from "../lib/supabase";
 import DailyRoundModal from "../components/DailyRoundModal";
+import { autoAssignICUBed } from "./ICUQueuePage";
 
 export default function ICUScheduling() {
   const [loadingType, setLoadingType] = useState(null); // "optimized" | null
@@ -100,6 +101,13 @@ export default function ICUScheduling() {
       });
       setShowAddBedForm(false);
       await loadBedsData();
+
+      // After adding a new available bed, try to auto-assign to waiting patient
+      const result = await autoAssignICUBed();
+      if (result.assigned > 0) {
+        await loadBedsData(); // Reload to show updated bed assignment
+        alert(`✅ ${result.message}`);
+      }
     } catch (err) {
       setError(err.message || "Failed to add bed");
     } finally {
@@ -148,6 +156,47 @@ export default function ICUScheduling() {
       is_available: bed.is_available,
     });
     setShowAddBedForm(true);
+  };
+
+  const handleDischarge = async (bed) => {
+    const patient = bed.activeQueue;
+    if (!patient) return;
+    
+    if (!window.confirm(`Discharge ${patient.patient_name} from ICU Bed ${bed.bed_id}?`)) return;
+    
+    try {
+      // 1. Free up ICU bed
+      const { error: bedError } = await supabase
+        .from('icu_beds')
+        .update({ is_available: true })
+        .eq('id', bed.id);
+
+      if (bedError) throw bedError;
+
+      // 2. Update queue status
+      const { error: queueError } = await supabase
+        .from('icu_queue')
+        .update({
+          status: 'discharged',
+          discharged_at: new Date().toISOString()
+        })
+        .eq('id', patient.id);
+
+      if (queueError) throw queueError;
+
+      // 3. Try to auto-assign the freed bed to the oldest waiting patient
+      const result = await autoAssignICUBed();
+      if (result.assigned > 0) {
+        await loadBedsData();
+        alert(`✅ ${patient.patient_name} discharged. ${result.message}`);
+      } else {
+        await loadBedsData();
+        alert(`✅ ${patient.patient_name} has been discharged.`);
+      }
+    } catch (err) {
+      console.error('Discharge error:', err);
+      alert('Error: ' + err.message);
+    }
   };
 
   const cancelBedForm = () => {
@@ -237,7 +286,7 @@ export default function ICUScheduling() {
     );
   };
 
-  const ICUBedCard = ({ bed, onEdit, onDelete, onRound }) => {
+  const ICUBedCard = ({ bed, onEdit, onDelete, onRound, onDischarge }) => {
     const q = bed.activeQueue;
     const isAvailable = bed.is_available;
 
@@ -334,13 +383,22 @@ export default function ICUScheduling() {
               <span className="material-symbols-outlined text-sm">monitor_heart</span>
               <span className="uppercase tracking-wider">ICU</span>
             </div>
-            <button
-              onClick={(e) => { e.stopPropagation(); onRound(bed); }}
-              className="text-[10px] font-bold uppercase tracking-wider bg-red-600 text-white px-2 py-1 rounded hover:bg-red-700 transition-colors border border-red-100 flex items-center gap-1"
-            >
-              <span className="material-symbols-outlined text-xs">edit_note</span>
-              Round
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={(e) => { e.stopPropagation(); onDischarge(bed); }}
+                className="text-[10px] font-bold uppercase tracking-wider bg-slate-600 text-white px-2 py-1 rounded hover:bg-slate-700 transition-colors border border-slate-500 flex items-center gap-1"
+              >
+                <span className="material-symbols-outlined text-xs">logout</span>
+                Discharge
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); onRound(bed); }}
+                className="text-[10px] font-bold uppercase tracking-wider bg-red-600 text-white px-2 py-1 rounded hover:bg-red-700 transition-colors border border-red-100 flex items-center gap-1"
+              >
+                <span className="material-symbols-outlined text-xs">edit_note</span>
+                Round
+              </button>
+            </div>
           </div>
 
         </div>
@@ -613,6 +671,7 @@ export default function ICUScheduling() {
                       onEdit={startEditBed}
                       onDelete={handleDeleteBed}
                       onRound={(bedObj) => setRoundBed({ ...bedObj, bed_number: bedObj.bed_id, bed_id: bedObj.id })}
+                      onDischarge={handleDischarge}
                     />
                   ))}
                 </div>
