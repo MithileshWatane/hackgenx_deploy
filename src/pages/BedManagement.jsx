@@ -1,10 +1,14 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { supabase } from '../lib/supabase';
 import DailyRoundModal from '../components/DailyRoundModal';
+import ShiftToICUModal from '../components/ShiftToICUModal';
+import { useAuth } from '../context/AuthContext_simple';
+import { processWaitingQueue, assignSinglePatient } from '../services/autoBedAssignmentService';
+
 
 // ── Bed Card ──────────────────────────────────────────────────────────────────
 
-function BedCard({ bed, onUpdate, onDischarge, onUpdateRound }) {
+function BedCard({ bed, onUpdate, onDischarge, onUpdateRound, onShiftToICU }) {
     const { bed_id, id, bed_number, status, patient, admission, notes } = bed;
 
     const bedId = bed_id || id;
@@ -20,9 +24,20 @@ function BedCard({ bed, onUpdate, onDischarge, onUpdateRound }) {
 
     const countdown = (dischargeIso) => {
         if (!dischargeIso) return null;
-        const diffMs = new Date(dischargeIso).getTime() - Date.now();
-        if (diffMs <= 0) return { label: 'Overdue', color: 'text-red-500' };
-        const days = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+
+        // Reset times to midnight for calendar-day calculation
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        const targetDate = new Date(dischargeIso);
+        targetDate.setHours(0, 0, 0, 0);
+
+        const diffMs = targetDate.getTime() - today.getTime();
+        const days = Math.round(diffMs / (1000 * 60 * 60 * 24));
+
+        if (days < 0) return { label: 'Overdue', color: 'text-red-500' };
+        if (days === 0) return { label: 'DC Today', color: 'text-amber-500 font-bold' };
+
         return {
             label: `${days}d left`,
             color: days <= 1 ? 'text-amber-500' : 'text-emerald-600'
@@ -150,30 +165,36 @@ function BedCard({ bed, onUpdate, onDischarge, onUpdateRound }) {
         </div>
     );
 
-    // occupied (General or others) — Blue
+    // occupied (General or others) — Red
     return (
-        <div className="group bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md hover:border-[#2b8cee]/50 transition-all cursor-pointer relative overflow-hidden flex flex-col h-full">
-            <div className="h-1 bg-[#2b8cee] w-full absolute top-0" />
+        <div className="group bg-white rounded-xl border border-red-200 shadow-sm hover:shadow-md hover:border-red-400 transition-all cursor-pointer relative overflow-hidden flex flex-col h-full">
+            <div className="h-1 bg-red-500 w-full absolute top-0" />
             <div className="p-5 flex flex-col h-full">
                 <div className="flex justify-between items-start mb-2">
                     <span className="font-bold text-slate-900 text-xl">{displayId}</span>
-                    <div className="px-2 py-0.5 rounded text-xs font-semibold bg-[#2b8cee]/10 text-[#2b8cee] flex items-center gap-1">
-                        <span className="size-1.5 rounded-full bg-[#2b8cee] animate-pulse inline-block" />
+                    <div className="px-2 py-0.5 rounded text-xs font-semibold bg-red-100 text-red-600 flex items-center gap-1">
+                        <span className="size-1.5 rounded-full bg-red-500 animate-pulse inline-block" />
                         Occupied{isGeneral ? ' (General)' : ''}
                     </div>
                 </div>
                 <h4 className="text-base font-semibold text-slate-900">{q?.patient_name || '—'}</h4>
                 {q?.disease && <p className="text-xs text-slate-500 font-medium">{q.disease}</p>}
-                <DischargeInfo accent="blue" />
+                <DischargeInfo accent="red" />
                 {notes && <p className="text-xs font-medium text-slate-700 bg-slate-50 p-1.5 rounded">Note: {notes}</p>}
                 <div className="mt-auto pt-2 border-t border-slate-100 flex items-center justify-end gap-2">
+                    {isGeneral && (
+                        <button
+                            onClick={(e) => { e.stopPropagation(); onShiftToICU(bed); }}
+                            className="text-[10px] font-bold uppercase tracking-wider bg-red-50 text-red-600 px-2 py-1 rounded hover:bg-red-600 hover:text-white transition-colors border border-red-100"
+                        >Shift to ICU</button>
+                    )}
                     <button
                         onClick={(e) => { e.stopPropagation(); onDischarge(bedId); }}
-                        className="text-[10px] font-bold uppercase tracking-wider bg-blue-50 text-[#2b8cee] px-2 py-1 rounded hover:bg-[#2b8cee] hover:text-white transition-colors border border-[#2b8cee]/20"
+                        className="text-[10px] font-bold uppercase tracking-wider bg-red-100 text-red-700 px-2 py-1 rounded hover:bg-red-600 hover:text-white transition-colors border border-red-200"
                     >Discharge</button>
                     <button
                         onClick={(e) => { e.stopPropagation(); onUpdateRound(bed); }}
-                        className="text-[10px] font-bold uppercase tracking-wider bg-[#2b8cee] text-white px-2 py-1 rounded hover:bg-blue-600 transition-colors border border-blue-100 flex items-center gap-1"
+                        className="text-[10px] font-bold uppercase tracking-wider bg-red-500 text-white px-2 py-1 rounded hover:bg-red-600 transition-colors border border-red-100 flex items-center gap-1"
                     >
                         <span className="material-symbols-outlined text-xs">edit_note</span>
                         Round
@@ -186,9 +207,9 @@ function BedCard({ bed, onUpdate, onDischarge, onUpdateRound }) {
 
 // ── Add Bed Modal ─────────────────────────────────────────────────────────────
 
-function AddBedModal({ onClose, onAdd }) {
+function AddBedModal({ onClose, onAdd, user }) {
     const [bedId, setBedId] = useState('');
-    const [bedType, setBedType] = useState('icu');
+    const [bedType, setBedType] = useState('general');
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
 
@@ -204,10 +225,18 @@ function AddBedModal({ onClose, onAdd }) {
                 .insert([{
                     bed_number: trimmed,
                     bed_type: bedType,
-                    status: 'available'
+                    status: 'available',
+                    doctor_id: user?.id  // Store current doctor's ID
                 }]);
 
             if (insertError) throw insertError;
+
+            // After adding a new available bed, try to auto-assign to waiting patient
+            const result = await assignSinglePatient(user?.id);
+            if (result.assigned > 0) {
+                alert(`✅ ${result.message}`);
+            }
+
             onAdd(); // Trigger refresh
             onClose();
         } catch (err) {
@@ -256,38 +285,16 @@ function AddBedModal({ onClose, onAdd }) {
                         <label className="block text-xs font-semibold text-slate-700 mb-2 uppercase tracking-wide">
                             Bed Type <span className="text-red-500">*</span>
                         </label>
-                        <div className="grid grid-cols-2 gap-3">
-                            <button
-                                type="button"
-                                onClick={() => setBedType('icu')}
-                                disabled={loading}
-                                className={`flex flex-col items-center gap-2 p-4 rounded-xl border-2 transition-all ${bedType === 'icu'
-                                    ? 'border-red-500 bg-red-50'
-                                    : 'border-slate-200 bg-slate-50 hover:border-slate-300 shadow-sm'
-                                    }`}
+                        <div className="grid grid-cols-1">
+                            <div
+                                className="flex flex-col items-center gap-2 p-4 rounded-xl border-2 border-[#2b8cee] bg-blue-50 transition-all"
                             >
-                                <span className={`material-symbols-outlined text-2xl ${bedType === 'icu' ? 'text-red-500' : 'text-slate-400'}`}>monitor_heart</span>
+                                <span className="material-symbols-outlined text-2xl text-[#2b8cee]">bed</span>
                                 <div className="text-center">
-                                    <p className={`text-sm font-bold ${bedType === 'icu' ? 'text-red-700' : 'text-slate-700'}`}>ICU</p>
-                                    <p className="text-[10px] text-slate-500 mt-0.5">Intensive Care Unit</p>
-                                </div>
-                            </button>
-
-                            <button
-                                type="button"
-                                onClick={() => setBedType('general')}
-                                disabled={loading}
-                                className={`flex flex-col items-center gap-2 p-4 rounded-xl border-2 transition-all ${bedType === 'general'
-                                    ? 'border-[#2b8cee] bg-blue-50'
-                                    : 'border-slate-200 bg-slate-50 hover:border-slate-300 shadow-sm'
-                                    }`}
-                            >
-                                <span className={`material-symbols-outlined text-2xl ${bedType === 'general' ? 'text-[#2b8cee]' : 'text-slate-400'}`}>bed</span>
-                                <div className="text-center">
-                                    <p className={`text-sm font-bold ${bedType === 'general' ? 'text-blue-700' : 'text-slate-700'}`}>General Ward</p>
+                                    <p className="text-sm font-bold text-blue-700">General Ward</p>
                                     <p className="text-[10px] text-slate-500 mt-0.5">Standard ward bed</p>
                                 </div>
-                            </button>
+                            </div>
                         </div>
                     </div>
 
@@ -315,40 +322,55 @@ function AddBedModal({ onClose, onAdd }) {
 
 // ── Main Component ────────────────────────────────────────────────────────────
 
-const WARDS = ['All Wards', 'ICU', 'General Ward', 'Emergency', 'Pediatrics'];
+const WARDS = ['General Ward'];
 
 export default function BedManagement() {
+    const { user } = useAuth();
     const [activeWard, setActiveWard] = useState('All Wards');
     const [sortBy, setSortBy] = useState('Bed Number');
     const [beds, setBeds] = useState([]);
     const [loading, setLoading] = useState(true);
     const [showAddBed, setShowAddBed] = useState(false);
     const [showRoundModal, setShowRoundModal] = useState(false);
+    const [showShiftModal, setShowShiftModal] = useState(false);
     const [selectedBed, setSelectedBed] = useState(null);
+    const [selectedBedForShift, setSelectedBedForShift] = useState(null);
 
     const fetchBeds = useCallback(async () => {
+        if (!user?.id) { setLoading(false); return; }
         setLoading(true);
         try {
-            const { data, error } = await supabase
+            // Get beds for current doctor only
+            const { data: bedsData, error: bedsError } = await supabase
                 .from('beds')
                 .select(`
                     *,
-                    patient_id,
-                    queue_entry:bed_queue(
-                        id, patient_name, disease, phone, age,
-                        admitted_from_opd_at, bed_assigned_at, status,
-                        predictions:discharge_predictions(
-                            predicted_discharge_date, remaining_days, confidence, reasoning, created_at
-                        )
+                    patient_id
+                `)
+                .eq('doctor_id', user.id);  // Filter by doctor
+
+            if (bedsError) throw bedsError;
+
+            // Get queue entries for the current doctor only
+            const { data: queueData, error: queueError } = await supabase
+                .from('bed_queue')
+                .select(`
+                    id, patient_name, disease, phone, age, token_number,
+                    admitted_from_opd_at, bed_assigned_at, status, bed_id,
+                    predictions:discharge_predictions(
+                        predicted_discharge_date, remaining_days, confidence, reasoning, created_at
                     )
-                `);
+                `)
+                .eq('doctor_id', user.id);
 
-            if (error) throw error;
+            if (queueError) throw queueError;
 
-            const formatted = (data || []).map(bed => {
-                const activeQ = bed.queue_entry?.find(
+            // Map queue data to beds
+            const formatted = (bedsData || []).map(bed => {
+                const bedQueueEntries = queueData?.filter(q => q.bed_id === bed.bed_id) || [];
+                const activeQ = bedQueueEntries.find(
                     q => q.status === 'bed_assigned' || q.status === 'admitted'
-                ) || bed.queue_entry?.[0] || null;
+                ) || bedQueueEntries[0] || null;
 
                 // Attach the most recent prediction to the active queue entry
                 if (activeQ && activeQ.predictions?.length) {
@@ -367,7 +389,7 @@ export default function BedManagement() {
         } finally {
             setLoading(false);
         }
-    }, []);
+    }, [user?.id]);
 
     useEffect(() => {
         fetchBeds();
@@ -380,6 +402,15 @@ export default function BedManagement() {
                 .update({ status: newStatus })
                 .eq('bed_id', id);
             if (error) throw error;
+
+            // If bed is now available, try to auto-assign to the oldest waiting patient
+            if (newStatus === 'available') {
+                const result = await assignSinglePatient(user?.id);
+                if (result.assigned > 0) {
+                    alert(`✅ ${result.message}`);
+                }
+            }
+
             fetchBeds();
         } catch (err) {
             console.error('Update bed status error:', err);
@@ -410,6 +441,12 @@ export default function BedManagement() {
 
             if (queueError) throw queueError;
 
+            // 3. Try to auto-assign the freed bed to the oldest waiting patient
+            const result = await assignSinglePatient(user?.id);
+            if (result.assigned > 0) {
+                alert(`✅ ${result.message}`);
+            }
+
             fetchBeds();
         } catch (err) {
             console.error('Discharge error:', err);
@@ -417,12 +454,7 @@ export default function BedManagement() {
         }
     };
 
-    const filteredBeds = beds.filter(bed => {
-        if (activeWard === 'All Wards') return true;
-        if (activeWard === 'ICU') return bed.bed_type === 'icu';
-        if (activeWard === 'General Ward') return bed.bed_type === 'general';
-        return bed.bed_type?.toLowerCase() === activeWard.toLowerCase();
-    });
+    const filteredBeds = beds.filter(bed => bed.bed_type === 'general');
 
     const sortedBeds = [...filteredBeds].sort((a, b) => {
         if (sortBy === 'Bed Number') return (a.bed_number || '').localeCompare(b.bed_number || '');
@@ -435,20 +467,35 @@ export default function BedManagement() {
 
     // Stats
     const stats = [
-        { label: 'Occupied', count: beds.filter(b => b.status === 'occupied').length, color: 'bg-[#2b8cee]' },
-        { label: 'Available', count: beds.filter(b => b.status === 'available').length, color: 'bg-green-500' },
-        { label: 'Cleaning', count: beds.filter(b => b.status === 'cleaning').length, color: 'bg-yellow-500' },
-        { label: 'Critical', count: beds.filter(b => b.status === 'critical').length, color: 'bg-red-500' },
+        { label: 'Occupied', count: filteredBeds.filter(b => b.status === 'occupied').length, color: 'bg-[#2b8cee]' },
+        { label: 'Available', count: filteredBeds.filter(b => b.status === 'available').length, color: 'bg-green-500' },
+        { label: 'Cleaning', count: filteredBeds.filter(b => b.status === 'cleaning').length, color: 'bg-yellow-500' },
+        { label: 'Critical', count: filteredBeds.filter(b => b.status === 'critical').length, color: 'bg-red-500' },
     ];
 
     return (
         <div className="flex flex-1 flex-col overflow-hidden">
-            {showAddBed && <AddBedModal onClose={() => setShowAddBed(false)} onAdd={fetchBeds} />}
+            {showAddBed && <AddBedModal onClose={() => setShowAddBed(false)} onAdd={fetchBeds} user={user} />}
             {showRoundModal && selectedBed && (
                 <DailyRoundModal
                     bed={selectedBed}
                     onClose={() => { setShowRoundModal(false); setSelectedBed(null); }}
                     onUpdate={fetchBeds}
+                />
+            )}
+            {showShiftModal && selectedBedForShift && (
+                <ShiftToICUModal
+                    patient={{
+                        token_number: selectedBedForShift.activeQueue?.token_number,
+                        patient_name: selectedBedForShift.activeQueue?.patient_name,
+                        disease: selectedBedForShift.activeQueue?.disease,
+                        original_bed_id: selectedBedForShift.bed_id || selectedBedForShift.id
+                    }}
+                    onClose={() => { setShowShiftModal(false); setSelectedBedForShift(null); }}
+                    onShift={() => {
+                        alert('Patient added to ICU Queue successfully!');
+                        fetchBeds();
+                    }}
                 />
             )}
 
@@ -458,7 +505,7 @@ export default function BedManagement() {
                         <span className="material-symbols-outlined text-lg">domain</span>
                         <span>City General Hospital</span>
                         <span className="material-symbols-outlined text-lg">chevron_right</span>
-                        <span className="text-[#2b8cee] font-semibold">Bed Management</span>
+                        <span className="text-[#2b8cee] font-semibold">Bed Scheduling</span>
                     </div>
                 </div>
 
@@ -466,10 +513,6 @@ export default function BedManagement() {
                     <button onClick={() => setShowAddBed(true)} className="flex items-center gap-2 rounded-lg h-10 px-4 bg-white hover:bg-slate-50 border border-slate-200 transition-colors text-slate-700 text-sm font-semibold">
                         <span className="material-symbols-outlined text-[20px] text-[#2b8cee]">add_box</span>
                         Add Bed
-                    </button>
-                    <button className="flex items-center gap-2 rounded-lg h-10 px-4 bg-[#2b8cee] hover:bg-blue-600 transition-colors text-white text-sm font-bold shadow-md shadow-[#2b8cee]/20">
-                        <span className="material-symbols-outlined text-[20px]">add_circle</span>
-                        Quick Allocation
                     </button>
                     <div className="size-9 rounded-full bg-slate-200 flex items-center justify-center text-slate-400">
                         <span className="material-symbols-outlined">person</span>
@@ -481,13 +524,7 @@ export default function BedManagement() {
                 <main className="flex-1 flex flex-col min-w-0">
                     <div className="bg-white px-6 py-4 border-b border-slate-200 flex flex-col md:flex-row md:items-center justify-between gap-4 sticky top-0 z-10 shadow-sm">
                         <div className="flex items-center gap-2 overflow-x-auto pb-1">
-                            {WARDS.map((w) => (
-                                <button
-                                    key={w}
-                                    onClick={() => setActiveWard(w)}
-                                    className={`px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-colors ${activeWard === w ? 'bg-slate-900 text-white shadow-sm' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-50'}`}
-                                >{w}</button>
-                            ))}
+                            <h2 className="text-lg font-bold text-slate-800 px-4">General Ward Beds</h2>
                         </div>
                         <div className="flex items-center gap-2 text-sm text-slate-500">
                             <span className="material-symbols-outlined text-lg">sort</span>
@@ -519,6 +556,7 @@ export default function BedManagement() {
                                         onUpdate={handleUpdateBedStatus}
                                         onDischarge={handleDischarge}
                                         onUpdateRound={(b) => { setSelectedBed(b); setShowRoundModal(true); }}
+                                        onShiftToICU={(b) => { setSelectedBedForShift(b); setShowShiftModal(true); }}
                                     />
                                 ))}
                             </div>

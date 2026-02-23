@@ -1,24 +1,28 @@
 import React, { useState, useEffect } from "react";
 import {
-  runBaselineSchedule,
   runOptimizedSchedule,
+  predictWaitTime,
 } from "../services/schedulingService";
 import {
   getICUBeds,
   addICUBed,
   updateICUBed,
   deleteICUBed,
-  getBedStats,
 } from "../services/bedService";
+import { supabase } from "../lib/supabase";
+import DailyRoundModal from "../components/DailyRoundModal";
+import { autoAssignICUBed } from "./ICUQueuePage";
+import { useAuth } from '../context/AuthContext_simple';
 
 export default function ICUScheduling() {
-  const [loadingType, setLoadingType] = useState(null); // "baseline" | "optimized" | null
+  const { user } = useAuth();
+  const [loadingType, setLoadingType] = useState(null); // "optimized" | "prediction" | null
   const [error, setError] = useState("");
-  const [baselineResult, setBaselineResult] = useState(null);
+  const [roundBed, setRoundBed] = useState(null); // bed selected for daily round
   const [optimizedResult, setOptimizedResult] = useState(null);
-  
-  // Bed management state
-  const [activeTab, setActiveTab] = useState("scheduling"); // "scheduling" | "beds"
+  const [waitingQueue, setWaitingQueue] = useState([]);
+  const [waitPredictions, setWaitPredictions] = useState({});
+
   const [beds, setBeds] = useState([]);
   const [bedStats, setBedStats] = useState(null);
   const [showAddBedForm, setShowAddBedForm] = useState(false);
@@ -31,20 +35,6 @@ export default function ICUScheduling() {
     dialysis_available: false,
     is_available: true,
   });
-
-  const handleRunBaseline = async () => {
-    setLoadingType("baseline");
-    setError("");
-    try {
-      const res = await runBaselineSchedule();
-      setBaselineResult(res.data || res);
-    } catch (err) {
-      console.error("Baseline schedule error:", err);
-      setError(err.message || "Failed to run baseline scheduler");
-    } finally {
-      setLoadingType(null);
-    }
-  };
 
   const handleRunOptimized = async () => {
     setLoadingType("optimized");
@@ -60,32 +50,114 @@ export default function ICUScheduling() {
     }
   };
 
-  // Load beds data
-  const loadBedsData = async () => {
+  // Load waiting ICU queue patients for current doctor only
+  const loadWaitingQueue = async () => {
+    if (!user?.id) return;
     try {
-      const [bedsData, statsData] = await Promise.all([
-        getICUBeds(),
-        getBedStats(),
-      ]);
-      setBeds(bedsData);
-      setBedStats(statsData);
+      const { data, error } = await supabase
+        .from('icu_queue')
+        .select('*')
+        .eq('doctor_id', user.id)
+        .eq('status', 'waiting')
+        .order('time', { ascending: true });
+
+      if (error) throw error;
+      setWaitingQueue(data || []);
     } catch (err) {
-      console.error("Error loading beds:", err);
+      console.error("Error loading waiting queue:", err);
     }
   };
 
-  // Load beds on component mount and when tab changes
-  useEffect(() => {
-    if (activeTab === "beds") {
-      loadBedsData();
+  // Get wait time prediction for a patient
+  const getWaitTimePrediction = async (patientToken) => {
+    setLoadingType("prediction");
+    try {
+      const result = await predictWaitTime(patientToken, 20);
+      setWaitPredictions(prev => ({
+        ...prev,
+        [patientToken]: result.data
+      }));
+    } catch (err) {
+      console.error("Prediction error:", err);
+      setError(err.message || "Failed to get wait time prediction");
+    } finally {
+      setLoadingType(null);
     }
-  }, [activeTab]);
+  };
+
+  // Load predictions for all waiting patients
+  const loadAllPredictions = async () => {
+    if (waitingQueue.length === 0) return;
+    
+    setLoadingType("prediction");
+    setError("");
+    try {
+      const predictions = {};
+      for (const patient of waitingQueue) {
+        try {
+          const result = await predictWaitTime(patient.patient_token, 20);
+          predictions[patient.patient_token] = result.data;
+        } catch (err) {
+          console.error(`Prediction failed for ${patient.patient_token}:`, err);
+        }
+      }
+      setWaitPredictions(predictions);
+    } catch (err) {
+      console.error("Error loading predictions:", err);
+    } finally {
+      setLoadingType(null);
+    }
+  };
+
+  // Load beds data for current doctor only
+  const loadBedsData = async () => {
+    if (!user?.id) return;
+    try {
+      const [bedsData, { data: queueData, error: queueError }] = await Promise.all([
+        getICUBeds(user.id),  // Pass doctor ID
+        supabase.from('icu_queue').select('*').eq('doctor_id', user.id).in('status', ['assigned'])
+      ]);
+
+      if (queueError) throw queueError;
+
+      // Map queue data to beds — compare as strings to handle UUID vs integer mismatches
+      const formattedBeds = bedsData.map(bed => ({
+        ...bed,
+        is_icu: true,
+        activeQueue: queueData.find(q =>
+          String(q.assigned_bed_id) === String(bed.id) ||
+          String(q.assigned_bed_label).toUpperCase() === String(bed.bed_id).toUpperCase()
+        ) || null
+      }));
+
+      setBeds(formattedBeds);
+
+      // Calculate stats locally
+      const stats = {
+        total: formattedBeds.length,
+        available: formattedBeds.filter(b => b.is_available).length,
+        occupied: formattedBeds.filter(b => !b.is_available).length,
+        withVentilator: formattedBeds.filter(b => b.ventilator_available).length,
+        withDialysis: formattedBeds.filter(b => b.dialysis_available).length,
+      };
+      setBedStats(stats);
+    } catch (err) {
+      console.error("Error loading beds:", err);
+      setError("Failed to load ICU bed data");
+    }
+  };
+
+  // Load beds on component mount
+  useEffect(() => {
+    loadBedsData();
+    loadWaitingQueue();
+  }, []);
 
   // Bed management functions
   const handleAddBed = async () => {
     setBedFormLoading(true);
     try {
-      await addICUBed(bedForm);
+      await addICUBed(bedForm, user.id);
       setBedForm({
         bed_id: "",
         bed_type: "Basic",
@@ -95,6 +167,13 @@ export default function ICUScheduling() {
       });
       setShowAddBedForm(false);
       await loadBedsData();
+
+      // After adding a new available bed, try to auto-assign to waiting patient
+      const result = await autoAssignICUBed(user.id);
+      if (result.assigned > 0) {
+        await loadBedsData(); // Reload to show updated bed assignment
+        alert(`✅ ${result.message}`);
+      }
     } catch (err) {
       setError(err.message || "Failed to add bed");
     } finally {
@@ -143,6 +222,47 @@ export default function ICUScheduling() {
       is_available: bed.is_available,
     });
     setShowAddBedForm(true);
+  };
+
+  const handleDischarge = async (bed) => {
+    const patient = bed.activeQueue;
+    if (!patient) return;
+    
+    if (!window.confirm(`Discharge ${patient.patient_name} from ICU Bed ${bed.bed_id}?`)) return;
+    
+    try {
+      // 1. Free up ICU bed
+      const { error: bedError } = await supabase
+        .from('icu_beds')
+        .update({ is_available: true })
+        .eq('id', bed.id);
+
+      if (bedError) throw bedError;
+
+      // 2. Update queue status
+      const { error: queueError } = await supabase
+        .from('icu_queue')
+        .update({
+          status: 'discharged',
+          discharged_at: new Date().toISOString()
+        })
+        .eq('id', patient.id);
+
+      if (queueError) throw queueError;
+
+      // 3. Try to auto-assign the freed bed to the oldest waiting patient of this doctor
+      const result = await autoAssignICUBed(user.id);
+      if (result.assigned > 0) {
+        await loadBedsData();
+        alert(`✅ ${patient.patient_name} discharged. ${result.message}`);
+      } else {
+        await loadBedsData();
+        alert(`✅ ${patient.patient_name} has been discharged.`);
+      }
+    } catch (err) {
+      console.error('Discharge error:', err);
+      alert('Error: ' + err.message);
+    }
   };
 
   const cancelBedForm = () => {
@@ -218,7 +338,7 @@ export default function ICUScheduling() {
           </div>
           <div className="rounded-xl bg-slate-50 px-3 py-2">
             <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400 mb-1">
-              Admitted
+              Assigned
             </p>
             <p className="text-base font-bold text-slate-900">
               {admittedPatients ?? "—"}
@@ -227,6 +347,126 @@ export default function ICUScheduling() {
               </span>
             </p>
           </div>
+        </div>
+      </div>
+    );
+  };
+
+  const ICUBedCard = ({ bed, onEdit, onDelete, onRound, onDischarge }) => {
+    const q = bed.activeQueue;
+    const isAvailable = bed.is_available;
+
+    const fmt = (iso) => {
+      if (!iso) return null;
+      const d = new Date(iso);
+      return d.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: '2-digit' });
+    };
+
+    const countdown = (dischargeIso) => {
+      if (!dischargeIso) return null;
+
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+
+      const targetDate = new Date(dischargeIso);
+      targetDate.setHours(0, 0, 0, 0);
+
+      const diffMs = targetDate.getTime() - today.getTime();
+      const days = Math.round(diffMs / (1000 * 60 * 60 * 24));
+
+      if (days < 0) return { label: 'Overdue', color: 'text-red-500' };
+      if (days === 0) return { label: 'DC Today', color: 'text-amber-500 font-bold' };
+
+      return {
+        label: `${days}d left`,
+        color: days <= 1 ? 'text-amber-500' : 'text-emerald-600'
+      };
+    };
+
+    const admitDate = fmt(q?.admission_time || q?.time);
+    const dischargeDate = fmt(q?.discharge_time);
+    const ct = countdown(q?.discharge_time);
+
+    if (isAvailable) {
+      return (
+        <div className="group bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md hover:border-green-500/50 transition-all cursor-pointer relative overflow-hidden flex flex-col h-full">
+          <div className="h-1 bg-green-500 w-full absolute top-0" />
+          <div className="p-5 flex flex-col h-full justify-between">
+            <div className="flex justify-between items-start">
+              <span className="font-bold text-slate-900 text-xl">{bed.bed_id}</span>
+              <span className="px-2 py-0.5 rounded text-xs font-semibold bg-green-100 text-green-700">Available</span>
+            </div>
+            <div className="flex-1 flex flex-col gap-2 my-4">
+              <div className="flex items-center justify-between text-xs text-slate-500">
+                <span>Type: {bed.bed_type}</span>
+              </div>
+              <div className="flex flex-wrap gap-1">
+                {bed.ventilator_available && <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 rounded text-[10px] font-bold">VENT</span>}
+                {bed.dialysis_available && <span className="px-1.5 py-0.5 bg-purple-50 text-purple-600 rounded text-[10px] font-bold">DIAL</span>}
+              </div>
+            </div>
+            <div className="pt-3 border-t border-slate-100 flex gap-2">
+              <button onClick={() => onEdit(bed)} className="flex-1 py-1.5 rounded text-[11px] font-bold uppercase text-blue-600 border border-blue-100 hover:bg-blue-50 transition-colors">Edit</button>
+              <button onClick={() => onDelete(bed.id)} className="flex-1 py-1.5 rounded text-[11px] font-bold uppercase text-red-600 border border-red-100 hover:bg-red-50 transition-colors">Delete</button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // Occupied ICU Card
+    return (
+      <div className="group bg-white rounded-xl border border-red-200 shadow-sm hover:shadow-md hover:border-red-400 transition-all cursor-pointer relative overflow-hidden flex flex-col h-full ring-2 ring-red-50">
+        <div className="h-1 bg-red-500 w-full absolute top-0" />
+        <div className="p-5 flex flex-col h-full">
+          <div className="flex justify-between items-start mb-2">
+            <span className="font-bold text-slate-900 text-xl">{bed.bed_id}</span>
+            <div className="px-2 py-0.5 rounded text-xs font-semibold bg-red-100 text-red-600 flex items-center gap-1">
+              <span className="material-symbols-outlined text-[14px]">monitor_heart</span>
+              Occupied (ICU)
+            </div>
+          </div>
+          <h4 className="text-base font-semibold text-slate-900 truncate">{q?.patient_name || '—'}</h4>
+          <p className="text-xs text-slate-500 font-medium truncate mb-2">{q?.diseases || 'General ICU Care'}</p>
+
+          <div className="mt-2 mb-1 grid grid-cols-3 gap-1.5 text-center">
+            <div className="bg-slate-50 rounded-lg p-1.5">
+              <p className="text-[9px] font-bold uppercase text-slate-400 mb-0.5">Assigned On</p>
+              <p className="text-[11px] font-bold text-slate-700">{admitDate || '—'}</p>
+            </div>
+            <div className="bg-slate-50 rounded-lg p-1.5">
+              <p className="text-[9px] font-bold uppercase text-slate-400 mb-0.5">Est. DC</p>
+              <p className="text-[11px] font-bold text-slate-700">{dischargeDate || '—'}</p>
+            </div>
+            <div className="bg-slate-50 rounded-lg p-1.5">
+              <p className="text-[9px] font-bold uppercase text-slate-400 mb-0.5">Remaining</p>
+              <p className={`text-[11px] font-bold ${ct?.color || 'text-slate-400'}`}>{ct?.label || '—'}</p>
+            </div>
+          </div>
+
+          <div className="mt-auto pt-3 border-t border-slate-100 flex items-center justify-between">
+            <div className="flex items-center gap-1 text-xs text-red-600 font-medium">
+              <span className="material-symbols-outlined text-sm">monitor_heart</span>
+              <span className="uppercase tracking-wider">ICU</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={(e) => { e.stopPropagation(); onDischarge(bed); }}
+                className="text-[10px] font-bold uppercase tracking-wider bg-slate-600 text-white px-2 py-1 rounded hover:bg-slate-700 transition-colors border border-slate-500 flex items-center gap-1"
+              >
+                <span className="material-symbols-outlined text-xs">logout</span>
+                Discharge
+              </button>
+              <button
+                onClick={(e) => { e.stopPropagation(); onRound(bed); }}
+                className="text-[10px] font-bold uppercase tracking-wider bg-red-600 text-white px-2 py-1 rounded hover:bg-red-700 transition-colors border border-red-100 flex items-center gap-1"
+              >
+                <span className="material-symbols-outlined text-xs">edit_note</span>
+                Round
+              </button>
+            </div>
+          </div>
+
         </div>
       </div>
     );
@@ -259,86 +499,36 @@ export default function ICUScheduling() {
         </div>
 
         <div className="flex items-center gap-3">
-          {/* Tab Navigation */}
-          <div className="flex items-center bg-slate-100 rounded-lg p-1">
+          {/* Scheduling Actions */}
+          <>
             <button
-              onClick={() => setActiveTab("scheduling")}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                activeTab === "scheduling"
-                  ? "bg-white text-slate-900 shadow-sm"
-                  : "text-slate-600 hover:text-slate-900"
-              }`}
+              onClick={handleRunOptimized}
+              disabled={loadingType === "optimized"}
+              className="flex items-center gap-2 rounded-lg h-10 px-4 bg-[#2b8cee] hover:bg-blue-600 transition-colors text-white text-sm font-bold shadow-md shadow-[#2b8cee]/20 disabled:opacity-60"
             >
-              <span className="material-symbols-outlined text-lg">
-                schedule
-              </span>
-              Scheduling
+              {loadingType === "optimized" ? (
+                <span className="material-symbols-outlined animate-spin text-[18px]">
+                  progress_activity
+                </span>
+              ) : (
+                <span className="material-symbols-outlined text-[20px]">
+                  bolt
+                </span>
+              )}
+              Optimized Run
             </button>
-            <button
-              onClick={() => setActiveTab("beds")}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
-                activeTab === "beds"
-                  ? "bg-white text-slate-900 shadow-sm"
-                  : "text-slate-600 hover:text-slate-900"
-              }`}
-            >
-              <span className="material-symbols-outlined text-lg">
-                bed
-              </span>
-              Bed Management
-            </button>
-          </div>
+          </>
 
-          {/* Scheduling Actions - Only show on scheduling tab */}
-          {activeTab === "scheduling" && (
-            <>
-              <button
-                onClick={handleRunBaseline}
-                disabled={loadingType === "baseline" || loadingType === "optimized"}
-                className="flex items-center gap-2 rounded-lg h-10 px-4 bg-white hover:bg-slate-50 border border-slate-200 transition-colors text-slate-700 text-sm font-semibold disabled:opacity-60"
-              >
-                {loadingType === "baseline" ? (
-                  <span className="material-symbols-outlined animate-spin text-[18px] text-[#2b8cee]">
-                    progress_activity
-                  </span>
-                ) : (
-                  <span className="material-symbols-outlined text-[20px] text-slate-500">
-                    play_circle
-                  </span>
-                )}
-                Baseline Run
-              </button>
-              <button
-                onClick={handleRunOptimized}
-                disabled={loadingType === "baseline" || loadingType === "optimized"}
-                className="flex items-center gap-2 rounded-lg h-10 px-4 bg-[#2b8cee] hover:bg-blue-600 transition-colors text-white text-sm font-bold shadow-md shadow-[#2b8cee]/20 disabled:opacity-60"
-              >
-                {loadingType === "optimized" ? (
-                  <span className="material-symbols-outlined animate-spin text-[18px]">
-                    progress_activity
-                  </span>
-                ) : (
-                  <span className="material-symbols-outlined text-[20px]">
-                    bolt
-                  </span>
-                )}
-                Optimized Run
-              </button>
-            </>
-          )}
-
-          {/* Bed Management Actions - Only show on beds tab */}
-          {activeTab === "beds" && (
-            <button
-              onClick={() => setShowAddBedForm(true)}
-              className="flex items-center gap-2 rounded-lg h-10 px-4 bg-green-600 hover:bg-green-700 transition-colors text-white text-sm font-bold shadow-md shadow-green-600/20"
-            >
-              <span className="material-symbols-outlined text-[20px]">
-                add
-              </span>
-              Add Bed
-            </button>
-          )}
+          {/* Bed Management Actions */}
+          <button
+            onClick={() => setShowAddBedForm(true)}
+            className="flex items-center gap-2 rounded-lg h-10 px-4 bg-green-600 hover:bg-green-700 transition-colors text-white text-sm font-bold shadow-md shadow-green-600/20"
+          >
+            <span className="material-symbols-outlined text-[20px]">
+              add
+            </span>
+            Add Bed
+          </button>
         </div>
       </header>
 
@@ -352,252 +542,219 @@ export default function ICUScheduling() {
           </div>
         )}
 
-        {/* Scheduling Tab Content */}
-        {activeTab === "scheduling" && (
-          <>
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
-              {renderStatsCard(
-                "Baseline Schedule",
-                baselineResult,
-                "#64748b"
-              )}
-              {renderStatsCard(
-                "Optimized Schedule",
-                optimizedResult,
-                "#2b8cee"
-              )}
-            </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
-                <h3 className="text-sm font-bold text-slate-900 mb-1 uppercase tracking-wide">
-                  How this works
-                </h3>
-                <p className="text-sm text-slate-600 mb-3">
-                  The ICU scheduling engine reads live patient and bed data from the
-                  hospital database (via Supabase), generates admissions into the
-                  ICU, and writes the resulting plan back to the{" "}
-                  <span className="font-semibold">admissions</span> table.
-                </p>
-                <ul className="list-disc list-inside text-sm text-slate-600 space-y-1">
-                  <li>
-                    <span className="font-semibold">Baseline</span> uses a
-                    priority-based greedy algorithm (emergency status, severity,
-                    arrival time).
-                  </li>
-                  <li>
-                    <span className="font-semibold">Optimized</span> runs multiple
-                    randomized priority orders and keeps the plan with the lowest
-                    total waiting time.
-                  </li>
-                  <li>
-                    Both endpoints clear old ICU admissions and then insert the new
-                    optimized plan.
-                  </li>
-                </ul>
-              </div>
-
-              <div className="bg-[#2b8cee] rounded-2xl shadow-lg shadow-[#2b8cee]/30 p-5 text-white flex flex-col gap-3">
-                <div className="flex items-center gap-2">
-                  <span className="material-symbols-outlined text-2xl">
-                    insights
-                  </span>
-                  <div>
-                    <p className="text-xs font-semibold uppercase tracking-wide opacity-80">
-                      Decision Support
-                    </p>
-                    <p className="text-sm font-bold">Triage ICU beds smarter</p>
-                  </div>
-                </div>
-                <p className="text-[13px] leading-relaxed opacity-90">
-                  Use this panel before rounds or during surge situations to
-                  understand how many patients can realistically be admitted to ICU
-                  and what the expected waiting burden will be across different
-                  strategies.
-                </p>
-                <p className="text-[11px] leading-relaxed opacity-80 border-t border-white/20 pt-3 mt-1">
-                  This tool supports clinical judgment, it does not replace it.
-                  Always review extreme waiting times or suspicious outputs with
-                  your team before acting.
-                </p>
-              </div>
-            </div>
-          </>
-        )}
-
-        {/* Bed Management Tab Content */}
-        {activeTab === "beds" && (
-          <>
-            {/* Bed Statistics */}
-            {bedStats && (
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
-                <div className="bg-white rounded-xl border border-slate-200 p-4">
-                  <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Total Beds</p>
-                  <p className="text-2xl font-bold text-slate-900">{bedStats.total}</p>
-                </div>
-                <div className="bg-white rounded-xl border border-slate-200 p-4">
-                  <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Available</p>
-                  <p className="text-2xl font-bold text-green-600">{bedStats.available}</p>
-                </div>
-                <div className="bg-white rounded-xl border border-slate-200 p-4">
-                  <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Occupied</p>
-                  <p className="text-2xl font-bold text-red-600">{bedStats.occupied}</p>
-                </div>
-                <div className="bg-white rounded-xl border border-slate-200 p-4">
-                  <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Ventilator</p>
-                  <p className="text-2xl font-bold text-blue-600">{bedStats.withVentilator}</p>
-                </div>
-                <div className="bg-white rounded-xl border border-slate-200 p-4">
-                  <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Dialysis</p>
-                  <p className="text-2xl font-bold text-purple-600">{bedStats.withDialysis}</p>
-                </div>
-              </div>
+        {/* Scheduling Content */}
+        <>
+          <div className="grid grid-cols-1 gap-6 mb-6">
+            {renderStatsCard(
+              "Optimized Schedule",
+              optimizedResult,
+              "#2b8cee"
             )}
+          </div>
 
-            {/* Add/Edit Bed Form */}
-            {showAddBedForm && (
-              <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 mb-6">
-                <h3 className="text-lg font-bold text-slate-900 mb-4">
-                  {editingBed ? "Edit Bed" : "Add New Bed"}
-                </h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Bed ID</label>
-                    <input
-                      type="text"
-                      value={bedForm.bed_id}
-                      onChange={(e) => setBedForm({ ...bedForm, bed_id: e.target.value })}
-                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
-                      placeholder="e.g., B001"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-sm font-medium text-slate-700 mb-1">Bed Type</label>
-                    <select
-                      value={bedForm.bed_type}
-                      onChange={(e) => setBedForm({ ...bedForm, bed_type: e.target.value })}
-                      className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-6">
+            <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-sm p-5">
+              <h3 className="text-sm font-bold text-slate-900 mb-1 uppercase tracking-wide">
+                How this works
+              </h3>
+              <p className="text-sm text-slate-600 mb-3">
+                The ICU scheduling engine reads live patient and bed data from the
+                hospital database (via Supabase), generates admissions into the
+                ICU, and writes the resulting plan back to the{" "}
+                <span className="font-semibold">admissions</span> table.
+              </p>
+              <ul className="list-disc list-inside text-sm text-slate-600 space-y-1">
+                <li>
+                  <span className="font-semibold">Optimized</span> runs multiple
+                  randomized priority orders and keeps the plan with the lowest
+                  total waiting time.
+                </li>
+                <li>
+                  The endpoint clears old ICU admissions and then inserts the new
+                  optimized plan.
+                </li>
+              </ul>
+            </div>
+
+            <div className="bg-[#2b8cee] rounded-2xl shadow-lg shadow-[#2b8cee]/30 p-5 text-white flex flex-col gap-3">
+              <div className="flex items-center gap-2">
+                <span className="material-symbols-outlined text-2xl">
+                  insights
+                </span>
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide opacity-80">
+                    Decision Support
+                  </p>
+                  <p className="text-sm font-bold">Triage ICU beds smarter</p>
+                </div>
+              </div>
+              <p className="text-[13px] leading-relaxed opacity-90">
+                Use this panel before rounds or during surge situations to
+                understand how many patients can realistically be admitted to ICU
+                and what the expected waiting burden will be across different
+                strategies.
+              </p>
+              <p className="text-[11px] leading-relaxed opacity-80 border-t border-white/20 pt-3 mt-1">
+                This tool supports clinical judgment, it does not replace it.
+                Always review extreme waiting times or suspicious outputs with
+                your team before acting.
+              </p>
+            </div>
+          </div>
+        </>
+
+        {/* Bed Management Content */}
+        <>
+          {/* Bed Statistics */}
+          {bedStats && (
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
+              <div className="bg-white rounded-xl border border-slate-200 p-4">
+                <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Total Beds</p>
+                <p className="text-2xl font-bold text-slate-900">{bedStats.total}</p>
+              </div>
+              <div className="bg-white rounded-xl border border-slate-200 p-4">
+                <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Available</p>
+                <p className="text-2xl font-bold text-green-600">{bedStats.available}</p>
+              </div>
+              <div className="bg-white rounded-xl border border-slate-200 p-4">
+                <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Occupied</p>
+                <p className="text-2xl font-bold text-red-600">{bedStats.occupied}</p>
+              </div>
+              <div className="bg-white rounded-xl border border-slate-200 p-4">
+                <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Ventilator</p>
+                <p className="text-2xl font-bold text-blue-600">{bedStats.withVentilator}</p>
+              </div>
+              <div className="bg-white rounded-xl border border-slate-200 p-4">
+                <p className="text-xs font-semibold text-slate-500 uppercase mb-1">Dialysis</p>
+                <p className="text-2xl font-bold text-purple-600">{bedStats.withDialysis}</p>
+              </div>
+            </div>
+          )}
+
+          {/* Add/Edit Bed Modal */}
+          {showAddBedForm && (
+            <div className="fixed inset-0 bg-slate-900/20 backdrop-blur-sm flex items-center justify-center z-50">
+              <div className="bg-white rounded-2xl shadow-xl max-w-md w-full mx-4 max-h-[90vh] overflow-y-auto">
+                <div className="p-6 border-b border-slate-200">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-lg font-bold text-slate-900">
+                      {editingBed ? "Edit Bed" : "Add New Bed"}
+                    </h3>
+                    <button
+                      onClick={cancelBedForm}
+                      className="text-slate-400 hover:text-slate-600 transition-colors"
                     >
-                      <option value="Basic">Basic</option>
-                      <option value="Advanced">Advanced</option>
-                      <option value="Critical">Critical</option>
-                    </select>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      id="ventilator"
-                      checked={bedForm.ventilator_available}
-                      onChange={(e) => setBedForm({ ...bedForm, ventilator_available: e.target.checked })}
-                      className="w-4 h-4 text-blue-600 border-slate-300 rounded focus:ring-blue-500"
-                    />
-                    <label htmlFor="ventilator" className="text-sm font-medium text-slate-700">
-                      Ventilator Available
-                    </label>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      id="dialysis"
-                      checked={bedForm.dialysis_available}
-                      onChange={(e) => setBedForm({ ...bedForm, dialysis_available: e.target.checked })}
-                      className="w-4 h-4 text-blue-600 border-slate-300 rounded focus:ring-blue-500"
-                    />
-                    <label htmlFor="dialysis" className="text-sm font-medium text-slate-700">
-                      Dialysis Available
-                    </label>
+                      <span className="material-symbols-outlined text-2xl">close</span>
+                    </button>
                   </div>
                 </div>
-                <div className="flex gap-3 mt-4">
-                  <button
-                    onClick={editingBed ? handleUpdateBed : handleAddBed}
-                    disabled={bedFormLoading || !bedForm.bed_id}
-                    className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-slate-300 text-white font-medium rounded-lg transition-colors"
-                  >
-                    {bedFormLoading ? "Saving..." : editingBed ? "Update Bed" : "Add Bed"}
-                  </button>
-                  <button
-                    onClick={cancelBedForm}
-                    className="px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 font-medium rounded-lg transition-colors"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* Beds List */}
-            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm">
-              <div className="p-5 border-b border-slate-200">
-                <h3 className="text-lg font-bold text-slate-900">ICU Beds ({beds.length})</h3>
-              </div>
-              <div className="overflow-x-auto">
-                <table className="w-full">
-                  <thead className="bg-slate-50">
-                    <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">Bed ID</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">Type</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">Ventilator</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">Dialysis</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">Status</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-slate-500 uppercase tracking-wider">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-200">
-                    {beds.map((bed) => (
-                      <tr key={bed.id} className="hover:bg-slate-50">
-                        <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-slate-900">{bed.bed_id}</td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-slate-600">{bed.bed_type}</td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
-                            bed.ventilator_available ? 'bg-green-100 text-green-800' : 'bg-slate-100 text-slate-600'
-                          }`}>
-                            {bed.ventilator_available ? 'Available' : 'Not Available'}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
-                            bed.dialysis_available ? 'bg-green-100 text-green-800' : 'bg-slate-100 text-slate-600'
-                          }`}>
-                            {bed.dialysis_available ? 'Available' : 'Not Available'}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
-                            bed.is_available ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
-                          }`}>
-                            {bed.is_available ? 'Available' : 'Occupied'}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm">
-                          <button
-                            onClick={() => startEditBed(bed)}
-                            className="text-blue-600 hover:text-blue-800 font-medium mr-3"
-                          >
-                            Edit
-                          </button>
-                          <button
-                            onClick={() => handleDeleteBed(bed.id)}
-                            className="text-red-600 hover:text-red-800 font-medium"
-                          >
-                            Delete
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                {beds.length === 0 && (
-                  <div className="text-center py-8 text-slate-500">
-                    <span className="material-symbols-outlined text-4xl mb-2">bed</span>
-                    <p>No beds found. Click "Add Bed" to create your first ICU bed.</p>
+                <div className="p-6">
+                  <div className="space-y-4">
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Bed ID</label>
+                      <input
+                        type="text"
+                        value={bedForm.bed_id}
+                        onChange={(e) => setBedForm({ ...bedForm, bed_id: e.target.value })}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        placeholder="e.g., B001"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Bed Type</label>
+                      <select
+                        value={bedForm.bed_type}
+                        onChange={(e) => setBedForm({ ...bedForm, bed_type: e.target.value })}
+                        className="w-full px-3 py-2 border border-slate-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      >
+                        <option value="Basic">Basic</option>
+                        <option value="Advanced">Advanced</option>
+                        <option value="Critical">Critical</option>
+                      </select>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        id="ventilator"
+                        checked={bedForm.ventilator_available}
+                        onChange={(e) => setBedForm({ ...bedForm, ventilator_available: e.target.checked })}
+                        className="w-4 h-4 text-blue-600 border-slate-300 rounded focus:ring-blue-500"
+                      />
+                      <label htmlFor="ventilator" className="text-sm font-medium text-slate-700">
+                        Ventilator Available
+                      </label>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        id="dialysis"
+                        checked={bedForm.dialysis_available}
+                        onChange={(e) => setBedForm({ ...bedForm, dialysis_available: e.target.checked })}
+                        className="w-4 h-4 text-blue-600 border-slate-300 rounded focus:ring-blue-500"
+                      />
+                      <label htmlFor="dialysis" className="text-sm font-medium text-slate-700">
+                        Dialysis Available
+                      </label>
+                    </div>
                   </div>
-                )}
+                  <div className="flex gap-3 mt-6">
+                    <button
+                      onClick={editingBed ? handleUpdateBed : handleAddBed}
+                      disabled={bedFormLoading || !bedForm.bed_id}
+                      className="flex-1 px-4 py-2 bg-green-600 hover:bg-green-700 disabled:bg-slate-300 text-white font-medium rounded-lg transition-colors"
+                    >
+                      {bedFormLoading ? "Saving..." : editingBed ? "Update Bed" : "Add Bed"}
+                    </button>
+                    <button
+                      onClick={cancelBedForm}
+                      className="flex-1 px-4 py-2 bg-slate-200 hover:bg-slate-300 text-slate-700 font-medium rounded-lg transition-colors"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
               </div>
             </div>
-          </>
-        )}
+          )}
+
+          {/* Beds List */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm">
+            <div className="p-5 border-b border-slate-200">
+              <h3 className="text-lg font-bold text-slate-900">ICU Beds ({beds.length})</h3>
+            </div>
+            <div className="p-5">
+              {beds.length === 0 ? (
+                <div className="text-center py-8 text-slate-500">
+                  <span className="material-symbols-outlined text-4xl mb-2">bed</span>
+                  <p>No beds found. Click "Add Bed" to create your first ICU bed.</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                  {beds.map((bed) => (
+                    <ICUBedCard
+                      key={bed.id}
+                      bed={bed}
+                      onEdit={startEditBed}
+                      onDelete={handleDeleteBed}
+                      onRound={(bedObj) => setRoundBed({ ...bedObj, bed_number: bedObj.bed_id, bed_id: bedObj.id })}
+                      onDischarge={handleDischarge}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </>
       </main>
+
+      {/* Daily Round Modal */}
+      {roundBed && (
+        <DailyRoundModal
+          bed={roundBed}
+          onClose={() => setRoundBed(null)}
+          onUpdate={() => { setRoundBed(null); loadBedsData(); }}
+        />
+      )}
     </div>
   );
 }

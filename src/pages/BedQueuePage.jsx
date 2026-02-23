@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext_simple';
 import { supabase } from '../lib/supabase';
+import { processWaitingQueue, assignSinglePatient } from '../services/autoBedAssignmentService';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -22,6 +23,44 @@ function timeSince(isoString) {
     if (diffMin < 60) return `${diffMin} min`;
     const h = Math.floor(diffMin / 60);
     return `${h}h ${diffMin % 60}m`;
+}
+
+function formatWaitTime(minutes) {
+    if (!minutes && minutes !== 0) return 'Unknown';
+    if (minutes < 60) {
+        return `${Math.ceil(minutes)} min`;
+    } else if (minutes < 24 * 60) {
+        const hours = Math.floor(minutes / 60);
+        const mins = Math.ceil(minutes % 60);
+        return mins > 0 ? `${hours}h ${mins}m` : `${hours}h`;
+    } else {
+        const days = Math.floor(minutes / (24 * 60));
+        const hours = Math.floor((minutes % (24 * 60)) / 60);
+        // Always show both days and hours
+        return `${days}d ${hours}h`;
+    }
+}
+
+// Helper to get wait time from either the field or parse from notes
+function getEstimatedWaitTime(patient) {
+    // First try the dedicated field
+    if (patient.estimated_wait_minutes != null) {
+        return patient.estimated_wait_minutes;
+    }
+    // Fallback: try to parse from notes field (format: "Estimated wait: Xh Ym" or "X min")
+    if (patient.notes) {
+        const match = patient.notes.match(/Estimated wait:\s*(\d+)\s*h(?:\s*(\d+)\s*m)?/i);
+        if (match) {
+            const hours = parseInt(match[1]) || 0;
+            const mins = parseInt(match[2]) || 0;
+            return hours * 60 + mins;
+        }
+        const minMatch = patient.notes.match(/Estimated wait:\s*(\d+)\s*min/i);
+        if (minMatch) {
+            return parseInt(minMatch[1]);
+        }
+    }
+    return null;
 }
 
 const BED_TYPE_COLORS = {
@@ -68,10 +107,15 @@ function AssignBedModal({ patient, onClose, onAssign, assigning }) {
         const fetchAvailableBeds = async () => {
             setLoadingBeds(true);
             try {
+                // Get current user
+                const { data: { user } } = await supabase.auth.getUser();
+                
+                // Fetch only beds belonging to current doctor
                 const { data, error: fetchError } = await supabase
                     .from('beds')
                     .select('*')
                     .eq('status', 'available')
+                    .eq('doctor_id', user?.id)  // Filter by doctor
                     .order('bed_number', { ascending: true });
 
                 if (fetchError) throw fetchError;
@@ -223,25 +267,48 @@ export default function BedQueuePage() {
     const [updatingId, setUpdatingId] = useState(null);
     const [assignModalPatient, setAssignModalPatient] = useState(null);
     const [assigning, setAssigning] = useState(false);
+    const [filters, setFilters] = useState([
+        { key: 'all', label: 'Active', count: 0 },
+        { key: 'waiting_for_bed', label: 'Waiting', count: 0 },
+        { key: 'admitted', label: 'Admitted', count: 0 },
+    ]);
 
     const fetchBedQueue = useCallback(async () => {
         if (!user?.id) { setLoading(false); return; }
         setLoading(true);
         try {
-            let query = supabase
+            // Always fetch all non-discharged patients for stats calculation
+            let allQuery = supabase
                 .from('bed_queue')
                 .select('*')
                 .eq('doctor_id', user.id)
+                .neq('status', 'discharged')
                 .order('admitted_from_opd_at', { ascending: true });
 
+            const { data: allData } = await allQuery;
+            
+            // For filtered display, apply the active filter
+            let filteredData = allData || [];
             if (activeFilter !== 'all') {
-                query = query.eq('status', activeFilter);
-            } else {
-                query = query.neq('status', 'discharged');
+                filteredData = filteredData.filter(p => p.status === activeFilter);
             }
 
-            const { data } = await query;
-            setBedQueue(data || []);
+            setBedQueue(filteredData);
+            
+            // Update stats based on all data
+            const allStats = {
+                waiting: (allData || []).filter(p => p.status === 'waiting_for_bed').length,
+                assigned: (allData || []).filter(p => p.status === 'bed_assigned').length,
+                admitted: (allData || []).filter(p => p.status === 'admitted').length,
+            };
+            
+            // Update filters state with correct counts
+            setFilters([
+                { key: 'all', label: 'Active', count: (allData || []).length },
+                { key: 'waiting_for_bed', label: 'Waiting', count: allStats.waiting },
+                { key: 'admitted', label: 'Admitted', count: allStats.admitted },
+            ]);
+            
         } catch (err) {
             console.error('Bed queue fetch error:', err);
         } finally {
@@ -252,7 +319,36 @@ export default function BedQueuePage() {
     useEffect(() => {
         fetchBedQueue();
         const interval = setInterval(fetchBedQueue, 30000);
-        return () => clearInterval(interval);
+        
+        // Subscribe to realtime changes on bed_queue table
+        const bedQueueSubscription = supabase
+            .channel('bed_queue_changes')
+            .on('postgres_changes', 
+                { event: '*', schema: 'public', table: 'bed_queue' },
+                (payload) => {
+                    console.log('Bed queue change received:', payload);
+                    fetchBedQueue();
+                }
+            )
+            .subscribe();
+        
+        // Subscribe to realtime changes on beds table (when beds become available)
+        const bedsSubscription = supabase
+            .channel('beds_changes')
+            .on('postgres_changes', 
+                { event: '*', schema: 'public', table: 'beds' },
+                (payload) => {
+                    console.log('Beds change received:', payload);
+                    fetchBedQueue();
+                }
+            )
+            .subscribe();
+        
+        return () => {
+            clearInterval(interval);
+            supabase.removeChannel(bedQueueSubscription);
+            supabase.removeChannel(bedsSubscription);
+        };
     }, [fetchBedQueue]);
 
     const handleUpdateStatus = async (entry, newStatus) => {
@@ -292,6 +388,15 @@ export default function BedQueuePage() {
             // This logic can be expanded...
 
             await fetchBedQueue();
+
+            // After discharge, try to auto-assign freed bed to the oldest waiting patient of this doctor
+            if (newStatus === 'discharged' && entry.bed_id) {
+                const result = await assignSinglePatient(user?.id);
+                if (result.assigned > 0) {
+                    await fetchBedQueue(); // Refresh to show new assignments
+                    alert(`✅ ${result.message}`);
+                }
+            }
         } catch (err) {
             console.error('Update status error:', err);
             alert('Failed to update: ' + err.message);
@@ -353,17 +458,10 @@ export default function BedQueuePage() {
     );
 
     const stats = {
-        waiting: bedQueue.filter(p => p.status === 'waiting_for_bed').length,
-        assigned: bedQueue.filter(p => p.status === 'bed_assigned').length,
-        admitted: bedQueue.filter(p => p.status === 'admitted').length,
+        waiting: (bedQueue || []).filter(p => p.status === 'waiting_for_bed').length,
+        assigned: (bedQueue || []).filter(p => p.status === 'bed_assigned').length,
+        admitted: (bedQueue || []).filter(p => p.status === 'admitted').length,
     };
-
-    const FILTERS = [
-        { key: 'all', label: 'Active', count: bedQueue.length },
-        { key: 'waiting_for_bed', label: 'Waiting', count: stats.waiting },
-        { key: 'admitted', label: 'Admitted', count: stats.admitted },
-        { key: 'discharged', label: 'Discharged', count: null },
-    ];
 
     return (
         <div className="flex flex-1 flex-col overflow-hidden bg-[#f6f7f8]">
@@ -416,7 +514,7 @@ export default function BedQueuePage() {
                 </div>
 
                 <div className="mb-4 flex items-center gap-2 overflow-x-auto">
-                    {FILTERS.map((f) => (
+                    {filters.map((f) => (
                         <button
                             key={f.key}
                             onClick={() => setActiveFilter(f.key)}
@@ -461,7 +559,13 @@ export default function BedQueuePage() {
                                             <td className="px-5 py-4 text-slate-600 font-medium">{p.disease}</td>
                                             <td className="px-5 py-4">
                                                 {p.status === 'waiting_for_bed' ? (
-                                                    <span className="text-slate-400 italic text-xs">Unassigned</span>
+                                                    <div className="flex flex-col gap-1">
+                                                        <span className="text-amber-600 font-bold text-xs flex items-center gap-1">
+                                                            <span className="material-symbols-outlined text-[14px]">schedule</span>
+                                                            Est. Wait: {formatWaitTime(getEstimatedWaitTime(p))}
+                                                        </span>
+                                                        <span className="text-slate-400 italic text-[10px]">Waiting for available bed</span>
+                                                    </div>
                                                 ) : (
                                                     <div className="flex flex-col gap-1">
                                                         <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wide border w-fit ${BED_TYPE_COLORS[p.bed_type] || 'bg-slate-100 text-slate-600'}`}>{p.bed_type}</span>

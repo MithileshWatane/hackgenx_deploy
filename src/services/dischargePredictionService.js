@@ -6,17 +6,19 @@ const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GE
 
 /**
  * Main entry point: run discharge prediction after a daily round is saved.
- * @param {string} bedQueueId - The bed_queue.id for the current patient stay.
- * @param {string} currentRoundId - The id of the round just saved.
- * @param {object} bedQueueEntry - The bed_queue row (contains patient name, disease, bed_assigned_at etc).
+ * @param { string } queueId - The queue.id(bed_queue or icu_queue) for the current patient stay.
+ * @param { string } currentRoundId - The id of the round just saved.
+ * @param { object } bedQueueEntry - The queue row.
+ * @param { boolean } isICU - Whether this is an ICU patient.
  */
-export async function runDischargePrediction(bedQueueId, currentRoundId, bedQueueEntry) {
+export async function runDischargePrediction(queueId, currentRoundId, bedQueueEntry, isICU = false) {
+    const queueIdField = isICU ? 'icu_queue_id' : 'bed_queue_id';
     try {
         // ── Step 1: Fetch all rounds for this patient stay, ordered by date ────
         const { data: rounds, error: roundsError } = await supabase
             .from('daily_rounds')
             .select('*')
-            .eq('bed_queue_id', bedQueueId)
+            .eq(queueIdField, queueId)
             .order('round_date', { ascending: true });
 
         if (roundsError) throw roundsError;
@@ -25,18 +27,18 @@ export async function runDischargePrediction(bedQueueId, currentRoundId, bedQueu
         const { data: reports, error: reportsError } = await supabase
             .from('medical_reports')
             .select('id, round_id, report_type, ai_summary, created_at')
-            .eq('bed_queue_id', bedQueueId)
+            .eq(queueIdField, queueId)
             .order('created_at', { ascending: true });
 
         if (reportsError) throw reportsError;
 
         // ── Step 3: Build a structured timeline JSON ──────────────────────────
         const now = new Date();
-        const admittedAt = bedQueueEntry.bed_assigned_at
-            ? new Date(bedQueueEntry.bed_assigned_at)
-            : new Date(bedQueueEntry.admitted_from_opd_at || now);
+        // ICU uses admission_time, General Ward uses bed_assigned_at or admitted_from_opd_at
+        const admittedAt = bedQueueEntry.admission_time || bedQueueEntry.bed_assigned_at || bedQueueEntry.admitted_from_opd_at;
+        const admittedDate = admittedAt ? new Date(admittedAt) : now;
 
-        const daysSinceAdmission = Math.round((now - admittedAt) / (1000 * 60 * 60 * 24));
+        const daysSinceAdmission = Math.round((now - admittedDate) / (1000 * 60 * 60 * 24));
 
         // Map report summaries by round_id for easy lookup
         const reportsByRound = {};
@@ -63,9 +65,11 @@ export async function runDischargePrediction(bedQueueId, currentRoundId, bedQueu
 
         const patientContext = {
             patient_name: bedQueueEntry.patient_name,
-            disease: bedQueueEntry.disease,
-            admitted_on: admittedAt.toISOString(),
+            disease: bedQueueEntry.disease || bedQueueEntry.diseases, // ICU uses plural 'diseases'
+            admitted_on: admittedDate.toISOString(),
             current_datetime: now.toISOString(),
+            current_local_date: now.toLocaleDateString('en-CA'), // YYYY-MM-DD
+            current_local_time: now.toLocaleTimeString(),
             days_since_admission: daysSinceAdmission,
             total_rounds_recorded: timeline.length,
             clinical_timeline: timeline,
@@ -80,16 +84,34 @@ export async function runDischargePrediction(bedQueueId, currentRoundId, bedQueu
             const { error: saveError } = await supabase
                 .from('discharge_predictions')
                 .upsert([{
-                    bed_queue_id: bedQueueId,
+                    [queueIdField]: queueId,
                     round_id: currentRoundId,
                     predicted_discharge_date: prediction.predicted_discharge_date || null,
                     remaining_days: prediction.remaining_days != null ? parseInt(prediction.remaining_days) : null,
                     confidence: prediction.confidence != null ? parseFloat(prediction.confidence) : null,
                     reasoning: prediction.reasoning || '',
-                }], { onConflict: 'bed_queue_id,round_id' });
+                }], { onConflict: `${queueIdField},round_id` });
 
             if (saveError) {
                 console.error('Failed to save discharge prediction:', saveError);
+            } else {
+                // ── Step 6: Sync predicted date back to the primary queue record ──
+                const queueTable = isICU ? 'icu_queue' : 'bed_queue';
+                const dateColumn = isICU ? 'discharge_time' : 'discharge_time';
+
+                // Note: We update discharge_time so it's reflected on the cards
+                const { error: syncError } = await supabase
+                    .from(queueTable)
+                    .update({
+                        [dateColumn]: prediction.predicted_discharge_date
+                            ? `${prediction.predicted_discharge_date}T12:00:00Z`
+                            : null
+                    })
+                    .eq('id', queueId);
+
+                if (syncError) {
+                    console.error(`Failed to sync discharge_time to ${queueTable}:`, syncError);
+                }
             }
         }
 
@@ -126,7 +148,7 @@ ANALYSIS INSTRUCTIONS:
 1. Examine the clinical_timeline chronologically for trends in vitals (temperature, heart rate, BP, oxygen), condition status (improving/stable/critical), and doctor notes.
 2. Consider AI summaries from lab/radiology reports as objective clinical evidence.
 3. Account for days_since_admission — this patient is already ${patientContext.days_since_admission} day(s) into their stay.
-4. Base remaining_days on realistic REMAINING recovery time, not total stay.
+4. Base remaining_days on realistic REMAINING recovery time starting from the provided current_local_date (${patientContext.current_local_date}).
 5. Confidence: 0.0–1.0. Higher when trend is clear and multiple rounds exist; lower when data is sparse.
 
 RESPOND WITH ONLY THIS JSON OBJECT (no markdown, no explanation, just raw JSON):

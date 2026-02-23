@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext_simple';
 import { supabase } from '../lib/supabase';
+import ShiftToICUModal from '../components/ShiftToICUModal';
+import { autoAssignBed } from '../services/autoBedAssignmentService';
 
 const MOVING_AVG_WINDOW = 5;
 const DEFAULT_WAIT_MINUTES = 15;
@@ -49,6 +51,59 @@ function StatusBadge({ status }) {
     );
 }
 
+function AdmissionTypeModal({ patient, onClose, onSelect }) {
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm">
+            <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm mx-4 overflow-hidden animate-in zoom-in duration-200">
+                <div className="p-6 text-center">
+                    <div className="w-16 h-16 bg-purple-100 text-purple-600 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <span className="material-symbols-outlined text-3xl">bed</span>
+                    </div>
+                    <h2 className="text-xl font-bold text-slate-900 mb-2">Admit Patient</h2>
+                    <p className="text-sm text-slate-500 mb-6">Choose admission type for <strong>{patient.patient_name}</strong></p>
+
+                    <div className="grid grid-cols-1 gap-3">
+                        <button
+                            onClick={() => onSelect('general')}
+                            className="flex items-center justify-between p-4 rounded-xl border border-slate-200 hover:border-blue-500 hover:bg-blue-50 transition-all group"
+                        >
+                            <div className="flex items-center gap-3">
+                                <span className="material-symbols-outlined text-blue-600">ward</span>
+                                <div className="text-left">
+                                    <p className="font-bold text-slate-900">General Ward</p>
+                                    <p className="text-xs text-slate-500">Standard admission</p>
+                                </div>
+                            </div>
+                            <span className="material-symbols-outlined text-slate-300 group-hover:text-blue-500 transition-colors">chevron_right</span>
+                        </button>
+
+                        <button
+                            onClick={() => onSelect('icu')}
+                            className="flex items-center justify-between p-4 rounded-xl border border-slate-200 hover:border-red-500 hover:bg-red-50 transition-all group"
+                        >
+                            <div className="flex items-center gap-3">
+                                <span className="material-symbols-outlined text-red-600">monitor_heart</span>
+                                <div className="text-left">
+                                    <p className="font-bold text-slate-900">ICU</p>
+                                    <p className="text-xs text-slate-500">Critical care admission</p>
+                                </div>
+                            </div>
+                            <span className="material-symbols-outlined text-slate-300 group-hover:text-red-500 transition-colors">chevron_right</span>
+                        </button>
+                    </div>
+
+                    <button
+                        onClick={onClose}
+                        className="mt-6 w-full py-2 text-sm font-semibold text-slate-500 hover:text-slate-700 transition-colors"
+                    >
+                        Cancel
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
 function StatCard({ icon, iconColor, iconBg, name, sub, count, avgWait, barPct, barColor }) {
     return (
         <div className="flex flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -94,6 +149,9 @@ export default function QueueDashboard() {
     const [admittingId, setAdmittingId] = useState(null);
     const [search, setSearch] = useState('');
     const [movingAvgWait, setMovingAvgWait] = useState(DEFAULT_WAIT_MINUTES);
+    const [showAdmitTypeModal, setShowAdmitTypeModal] = useState(false);
+    const [selectedPatientForAdmit, setSelectedPatientForAdmit] = useState(null);
+    const [showICUModal, setShowICUModal] = useState(false);
 
     const fetchQueue = useCallback(async () => {
         if (!user?.id) {
@@ -178,22 +236,27 @@ export default function QueueDashboard() {
         }
     };
 
-    const handleAdmit = async (queueEntry) => {
-        const bedType = window.prompt(
-            `Admit ${queueEntry.patient_name} to which ward?\n\nOptions: general, icu, emergency, private, maternity`,
-            'general'
-        );
-        if (!bedType) return; // cancelled
-        const validTypes = ['general', 'icu', 'emergency', 'private', 'maternity'];
-        if (!validTypes.includes(bedType.trim().toLowerCase())) {
-            alert('Invalid bed type. Choose from: general, icu, emergency, private, maternity');
+    const handleAdmit = (queueEntry) => {
+        setSelectedPatientForAdmit(queueEntry);
+        setShowAdmitTypeModal(true);
+    };
+
+    const confirmAdmission = async (type) => {
+        if (!selectedPatientForAdmit) return;
+
+        if (type === 'icu') {
+            setShowAdmitTypeModal(false);
+            setShowICUModal(true);
             return;
         }
 
+        // General Ward Admission Logic
+        const queueEntry = selectedPatientForAdmit;
+        setShowAdmitTypeModal(false);
         setAdmittingId(queueEntry.id);
         try {
             // 1. Insert into bed_queue
-            const { error: bqError } = await supabase
+            const { data: insertedQueue, error: bqError } = await supabase
                 .from('bed_queue')
                 .insert([{
                     opd_queue_id: queueEntry.id,
@@ -202,13 +265,25 @@ export default function QueueDashboard() {
                     disease: queueEntry.disease,
                     token_number: queueEntry.token_number,
                     doctor_id: queueEntry.doctor_id,
-                    bed_type: bedType.trim().toLowerCase(),
+                    bed_type: 'general',
                     status: 'waiting_for_bed',
                     admitted_from_opd_at: new Date().toISOString(),
-                }]);
+                }])
+                .select();
+
             if (bqError) throw bqError;
 
-            // 2. Mark the OPD queue entry as completed
+            // 2. Auto-assign bed if available
+            let assignmentResult = null;
+            if (insertedQueue && insertedQueue[0]) {
+                assignmentResult = await autoAssignBed(
+                    insertedQueue[0].id,
+                    queueEntry.patient_name,
+                    'general'
+                );
+            }
+
+            // 3. Mark the OPD queue entry as completed
             const completedAt = new Date().toISOString();
             const actualWaitMinutes = parseFloat(
                 ((Date.now() - new Date(queueEntry.entered_queue_at).getTime()) / 60000).toFixed(2)
@@ -219,16 +294,56 @@ export default function QueueDashboard() {
                     status: 'completed',
                     completed_at: completedAt,
                     actual_wait_minutes: actualWaitMinutes,
+                    consultation_started_at: queueEntry.consultation_started_at || completedAt,
                 })
                 .eq('id', queueEntry.id);
 
             await fetchQueue();
-            alert(`${queueEntry.patient_name} has been admitted to the ${bedType} ward queue.`);
+            
+            // Show appropriate message based on assignment result
+            if (assignmentResult?.bedAssigned) {
+                alert(`✅ ${queueEntry.patient_name} admitted and assigned to Bed ${assignmentResult.bed.bed_number}!`);
+            } else if (assignmentResult?.waitTimeMinutes) {
+                alert(`📋 ${queueEntry.patient_name} added to bed queue.\nEstimated wait time: ${Math.ceil(assignmentResult.waitTimeMinutes / 60)}h ${assignmentResult.waitTimeMinutes % 60}m`);
+            } else {
+                alert(`${queueEntry.patient_name} added to General Ward queue.`);
+            }
         } catch (err) {
             console.error('Admit error:', err);
-            alert('Failed to admit patient: ' + err.message);
+            alert('Failed to admit: ' + err.message);
         } finally {
             setAdmittingId(null);
+            setSelectedPatientForAdmit(null);
+        }
+    };
+
+    const handleICUShiftComplete = async () => {
+        if (!selectedPatientForAdmit) return;
+        const queueEntry = selectedPatientForAdmit;
+
+        try {
+            // Mark OPD entry as complete
+            const completedAt = new Date().toISOString();
+            const actualWaitMinutes = parseFloat(
+                ((Date.now() - new Date(queueEntry.entered_queue_at).getTime()) / 60000).toFixed(2)
+            );
+            await supabase
+                .from('opd_queue')
+                .update({
+                    status: 'completed',
+                    completed_at: completedAt,
+                    actual_wait_minutes: actualWaitMinutes,
+                    consultation_started_at: queueEntry.consultation_started_at || completedAt,
+                })
+                .eq('id', queueEntry.id);
+
+            await fetchQueue();
+            alert(`${queueEntry.patient_name} added to ICU Queue.`);
+        } catch (err) {
+            console.error('ICU admission completion error:', err);
+        } finally {
+            setShowICUModal(false);
+            setSelectedPatientForAdmit(null);
         }
     };
 
@@ -244,6 +359,21 @@ export default function QueueDashboard() {
 
     return (
         <div className="flex flex-1 flex-col overflow-hidden bg-[#f6f7f8]">
+            {showAdmitTypeModal && selectedPatientForAdmit && (
+                <AdmissionTypeModal
+                    patient={selectedPatientForAdmit}
+                    onClose={() => setShowAdmitTypeModal(false)}
+                    onSelect={confirmAdmission}
+                />
+            )}
+
+            {showICUModal && selectedPatientForAdmit && (
+                <ShiftToICUModal
+                    patient={selectedPatientForAdmit}
+                    onClose={() => setShowICUModal(false)}
+                    onShift={handleICUShiftComplete}
+                />
+            )}
 
             {/* Header */}
             <header className="flex h-16 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-6">

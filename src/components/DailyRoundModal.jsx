@@ -38,17 +38,22 @@ export default function DailyRoundModal({ bed, onClose, onUpdate }) {
         setError('');
 
         try {
-            const bedQueueId = activeQueue.id;
-            if (!bedQueueId) {
-                throw new Error(`Patient stay information (bed_queue_id) not found for "${patientName}".`);
+            const queueId = activeQueue.id;
+            if (!queueId) {
+                throw new Error(`Patient stay information not found for "${patientName}".`);
             }
+
+            // Detect if this is an ICU patient
+            const isICU = !!bed.is_icu;
+            const queueIdField = isICU ? 'icu_queue_id' : 'bed_queue_id';
+            const bedIdField = isICU ? 'icu_bed_id' : 'bed_id';
 
             // 1. Insert into daily_rounds
             const { data: roundData, error: roundError } = await supabase
                 .from('daily_rounds')
                 .insert([{
-                    bed_queue_id: bedQueueId,
-                    bed_id: bedId,
+                    [queueIdField]: queueId,
+                    [bedIdField]: bedId,
                     temperature: formData.temperature ? parseFloat(formData.temperature) : null,
                     heart_rate: formData.heart_rate ? parseInt(formData.heart_rate) : null,
                     blood_pressure: formData.blood_pressure,
@@ -65,7 +70,7 @@ export default function DailyRoundModal({ bed, onClose, onUpdate }) {
             if (files.length > 0) {
                 for (const file of files) {
                     const fileExt = file.name.split('.').pop();
-                    const fileName = `${bedQueueId}/${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
+                    const fileName = `${queueId}/${Date.now()}-${Math.random().toString(36).substring(7)}.${fileExt}`;
                     const filePath = `rounds/${fileName}`;
 
                     const { error: uploadError } = await supabase.storage
@@ -83,7 +88,7 @@ export default function DailyRoundModal({ bed, onClose, onUpdate }) {
                     const { data: reportData, error: reportError } = await supabase
                         .from('medical_reports')
                         .insert([{
-                            bed_queue_id: bedQueueId,
+                            [queueIdField]: queueId,
                             round_id: roundData.id,
                             file_url: publicUrl,
                             report_type: reportType
@@ -112,7 +117,7 @@ export default function DailyRoundModal({ bed, onClose, onUpdate }) {
             setPredicting(true);
             setLoading(false);
 
-            const pred = await runDischargePrediction(bedQueueId, roundData.id, activeQueue);
+            const pred = await runDischargePrediction(queueId, roundData.id, activeQueue, isICU);
             setPrediction(pred);
             setPredicting(false);
 
@@ -151,7 +156,7 @@ export default function DailyRoundModal({ bed, onClose, onUpdate }) {
                         </div>
                         <div>
                             <h2 className="text-lg font-bold">Daily Health Round</h2>
-                            <p className="text-xs text-blue-100">Patient: {patientName} • Bed: {bed.bed_number || bedId.slice(0, 8)}</p>
+                            <p className="text-xs text-blue-100">Patient: {patientName} • Bed: {bed.bed_number || (typeof bedId === 'string' ? bedId.slice(0, 8) : bedId)}</p>
                         </div>
                     </div>
                     <button onClick={onClose} className="hover:bg-white/10 p-1 rounded-full transition-colors">

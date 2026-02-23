@@ -1,10 +1,11 @@
 import { supabase } from '../lib/supabase';
 
-// Get all ICU beds
-export const getICUBeds = async () => {
+// Get ICU beds for current doctor
+export const getICUBeds = async (doctorId) => {
   const { data, error } = await supabase
     .from('icu_beds')
     .select('*')
+    .eq('doctor_id', doctorId)
     .order('bed_id');
   
   if (error) throw error;
@@ -12,10 +13,10 @@ export const getICUBeds = async () => {
 };
 
 // Add a new ICU bed
-export const addICUBed = async (bedData) => {
+export const addICUBed = async (bedData, doctorId) => {
   const { data, error } = await supabase
     .from('icu_beds')
-    .insert([bedData])
+    .insert([{ ...bedData, doctor_id: doctorId }])
     .select();
   
   if (error) throw error;

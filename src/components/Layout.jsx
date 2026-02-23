@@ -5,7 +5,8 @@ import { useAuth } from '../context/AuthContext_simple';
 const navItems = [
     { icon: 'queue', label: 'OPD Queue', path: '/dashboard' },
     { icon: 'bed', label: 'Bed Queue', path: '/bed-queue' },
-    { icon: 'meeting_room', label: 'Bed Management', path: '/bed-management' },
+    { icon: 'monitor_heart', label: 'ICU Queue', path: '/icu-queue' },
+    { icon: 'meeting_room', label: 'Bed Scheduling', path: '/bed-management' },
     { icon: 'schedule', label: 'ICU Scheduling', path: '/icu-scheduling' },
     { icon: 'groups', label: 'Patients', path: '/patients' },
     { icon: 'calendar_today', label: 'Appointments', path: '/appointments' },
@@ -83,41 +84,24 @@ export default function Layout({ children }) {
                         })}
                     </nav>
 
-                    {/* System Nav */}
-                    <div className="mt-auto">
-                        <div className="mb-2 px-3 text-xs font-semibold uppercase tracking-wider text-slate-400">System</div>
-                        <nav className="flex flex-col gap-1">
-                            {[{ icon: 'settings', label: 'Settings' }, { icon: 'help', label: 'Help Center' }].map((item) => (
-                                <a
-                                    key={item.label}
-                                    href="#"
-                                    className="flex items-center gap-3 rounded-lg px-3 py-2 text-slate-600 hover:bg-slate-100 transition-colors"
-                                >
-                                    <span className="material-symbols-outlined">{item.icon}</span>
-                                    <span className="font-medium">{item.label}</span>
-                                </a>
-                            ))}
-                        </nav>
-
-                        {/* User Card */}
-                        <div className="mt-6 flex items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
-                            <div className="h-10 w-10 shrink-0 overflow-hidden rounded-full bg-[#2b8cee] flex items-center justify-center text-white font-semibold">
-                                {getUserInitials()}
-                            </div>
-                            <div className="flex flex-1 flex-col min-w-0">
-                                <span className="text-sm font-medium text-slate-900 truncate capitalize">
-                                    {userRole === 'doctor' ? 'Dr. ' : ''}{getUserName()}
-                                </span>
-                                <span className="text-xs text-slate-500 capitalize">{userRole}</span>
-                            </div>
-                            <button
-                                onClick={handleSignOut}
-                                className="text-slate-400 hover:text-slate-600 shrink-0 transition-colors"
-                                title="Sign out"
-                            >
-                                <span className="material-symbols-outlined text-[20px]">logout</span>
-                            </button>
+                    {/* User Card */}
+                    <div className="mt-auto flex items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3">
+                        <div className="h-10 w-10 shrink-0 overflow-hidden rounded-full bg-[#2b8cee] flex items-center justify-center text-white font-semibold">
+                            {getUserInitials()}
                         </div>
+                        <div className="flex flex-1 flex-col min-w-0">
+                            <span className="text-sm font-medium text-slate-900 truncate capitalize">
+                                {userRole === 'doctor' ? 'Dr. ' : ''}{getUserName()}
+                            </span>
+                            <span className="text-xs text-slate-500 capitalize">{userRole}</span>
+                        </div>
+                        <button
+                            onClick={handleSignOut}
+                            className="text-slate-400 hover:text-slate-600 shrink-0 transition-colors"
+                            title="Sign out"
+                        >
+                            <span className="material-symbols-outlined text-[20px]">logout</span>
+                        </button>
                     </div>
                 </div>
             </aside>

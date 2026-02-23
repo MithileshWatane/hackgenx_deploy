@@ -1,14 +1,23 @@
 import React, { useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext_simple';
+import MapLocationPicker from '../components/MapLocationPicker';
 
 export default function SignUp() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [role, setRole] = useState('')
+  const [street, setStreet] = useState('')
+  const [city, setCity] = useState('')
+  const [state, setState] = useState('')
+  const [zipCode, setZipCode] = useState('')
+  const [country, setCountry] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  
+  // Doctor location coordinates
+  const [doctorLocation, setDoctorLocation] = useState({ lat: 19.0760, lng: 72.8777 });
   
   const { signUp } = useAuth()
   const navigate = useNavigate()
@@ -37,7 +46,16 @@ export default function SignUp() {
       return
     }
 
-    const { error } = await signUp(email, password, role)
+    const { error } = await signUp(email, password, role, {
+      street,
+      city,
+      state,
+      zipCode,
+      country,
+      // Only include coordinates for doctors
+      latitude: role === 'doctor' ? doctorLocation.lat : null,
+      longitude: role === 'doctor' ? doctorLocation.lng : null
+    })
     
     if (error) {
       setError(error.message)
@@ -100,6 +118,11 @@ export default function SignUp() {
                   Patient
                 </button>
               </div>
+              {role === 'patient' && (
+                <p className="mt-2 text-xs text-slate-500">
+                  Patient accounts don't require location information.
+                </p>
+              )}
             </div>
             
             <div>
@@ -151,6 +174,111 @@ export default function SignUp() {
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
               />
+            </div>
+
+            <div className="border-t border-slate-200 pt-6">
+              <h3 className="text-sm font-medium text-slate-900 mb-4 flex items-center gap-2">
+                <span className="material-symbols-outlined text-[#2b8cee]">home</span>
+                Address Information
+              </h3>
+              
+              {/* Map Location Picker - Only for Doctors */}
+              {role === 'doctor' && (
+                <div className="mb-6 p-4 bg-blue-50/50 rounded-xl border border-blue-100">
+                  <h4 className="text-sm font-semibold text-slate-800 mb-3 flex items-center gap-2">
+                    <span className="material-symbols-outlined text-blue-500">location_on</span>
+                    Hospital Location <span className="text-xs font-normal text-slate-500">(Required)</span>
+                  </h4>
+                  <p className="text-xs text-slate-500 mb-4">
+                    Select your hospital location on the map. This helps patients find nearby healthcare facilities.
+                  </p>
+                  <MapLocationPicker 
+                    onLocationSelect={setDoctorLocation}
+                    initialLocation={doctorLocation}
+                  />
+                </div>
+              )}
+              
+              <div className="space-y-4">
+                <div>
+                  <label htmlFor="street" className="block text-sm font-medium text-slate-700">
+                    Street Address
+                  </label>
+                  <input
+                    id="street"
+                    name="street"
+                    type="text"
+                    className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-slate-900 placeholder-slate-400 focus:border-[#2b8cee] focus:outline-none focus:ring-2 focus:ring-[#2b8cee]/20"
+                    placeholder="Enter your street address (optional)"
+                    value={street}
+                    onChange={(e) => setStreet(e.target.value)}
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label htmlFor="city" className="block text-sm font-medium text-slate-700">
+                      City
+                    </label>
+                    <input
+                      id="city"
+                      name="city"
+                      type="text"
+                      className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-slate-900 placeholder-slate-400 focus:border-[#2b8cee] focus:outline-none focus:ring-2 focus:ring-[#2b8cee]/20"
+                      placeholder="Enter city (optional)"
+                      value={city}
+                      onChange={(e) => setCity(e.target.value)}
+                    />
+                  </div>
+
+                  <div>
+                    <label htmlFor="state" className="block text-sm font-medium text-slate-700">
+                      State
+                    </label>
+                    <input
+                      id="state"
+                      name="state"
+                      type="text"
+                      className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-slate-900 placeholder-slate-400 focus:border-[#2b8cee] focus:outline-none focus:ring-2 focus:ring-[#2b8cee]/20"
+                      placeholder="Enter state (optional)"
+                      value={state}
+                      onChange={(e) => setState(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label htmlFor="zipCode" className="block text-sm font-medium text-slate-700">
+                      Zip / Postal Code
+                    </label>
+                    <input
+                      id="zipCode"
+                      name="zipCode"
+                      type="text"
+                      className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-slate-900 placeholder-slate-400 focus:border-[#2b8cee] focus:outline-none focus:ring-2 focus:ring-[#2b8cee]/20"
+                      placeholder="Enter zip code (optional)"
+                      value={zipCode}
+                      onChange={(e) => setZipCode(e.target.value)}
+                    />
+                  </div>
+
+                  <div>
+                    <label htmlFor="country" className="block text-sm font-medium text-slate-700">
+                      Country
+                    </label>
+                    <input
+                      id="country"
+                      name="country"
+                      type="text"
+                      className="mt-1 block w-full rounded-lg border border-slate-300 px-3 py-2 text-slate-900 placeholder-slate-400 focus:border-[#2b8cee] focus:outline-none focus:ring-2 focus:ring-[#2b8cee]/20"
+                      placeholder="Enter country (optional)"
+                      value={country}
+                      onChange={(e) => setCountry(e.target.value)}
+                    />
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
