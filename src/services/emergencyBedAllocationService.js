@@ -1,4 +1,5 @@
 import { supabase } from '../lib/supabase';
+import { sendBedAssignmentNotification } from './bedNotificationService';
 
 /**
  * Finds the best compatible ICU bed for a patient based on their requirements
@@ -39,7 +40,7 @@ export async function allocateEmergencyICUBed({ icuQueueId, doctorId, patientReq
     try {
         let bedWasFreed = false;
         let transferredPatientName = null;
-        
+
         // 1. Check for available ICU beds
         const { data: availableBeds, error: bedError } = await supabase
             .from('icu_beds')
@@ -54,7 +55,7 @@ export async function allocateEmergencyICUBed({ icuQueueId, doctorId, patientReq
         // 2. If no beds available, try to free up a bed by transferring stable patient
         if (!availableBeds || availableBeds.length === 0) {
             console.log('No ICU beds available for emergency patient. Checking for stable patients to transfer...');
-            
+
             // Find ICU patients who are stable/improving based on their latest round
             const { data: icuPatients, error: icuPatientsError } = await supabase
                 .from('icu_queue')
@@ -81,15 +82,15 @@ export async function allocateEmergencyICUBed({ icuQueueId, doctorId, patientReq
             } else if (icuPatients && icuPatients.length > 0) {
                 // Find patients with stable/improving condition in their latest round
                 let candidateForTransfer = null;
-                
+
                 for (const icuPatient of icuPatients) {
                     if (icuPatient.daily_rounds && icuPatient.daily_rounds.length > 0) {
                         // Sort rounds by date to get the latest
-                        const sortedRounds = icuPatient.daily_rounds.sort((a, b) => 
+                        const sortedRounds = icuPatient.daily_rounds.sort((a, b) =>
                             new Date(b.round_date) - new Date(a.round_date)
                         );
                         const latestRound = sortedRounds[0];
-                        
+
                         if (latestRound.condition_status === 'stable' || latestRound.condition_status === 'improving') {
                             candidateForTransfer = icuPatient;
                             break; // Found a candidate
@@ -100,7 +101,7 @@ export async function allocateEmergencyICUBed({ icuQueueId, doctorId, patientReq
                 // If we found a stable/improving patient, transfer them to general bed
                 if (candidateForTransfer) {
                     console.log(`Found stable patient to transfer: ${candidateForTransfer.patient_name}`);
-                    
+
                     // Check if general beds are available
                     const { data: generalBeds, error: generalBedError } = await supabase
                         .from('beds')
@@ -111,7 +112,7 @@ export async function allocateEmergencyICUBed({ icuQueueId, doctorId, patientReq
 
                     if (!generalBedError && generalBeds && generalBeds.length > 0) {
                         const generalBed = generalBeds[0];
-                        
+
                         // Transfer stable patient to general bed queue
                         const transferTimestamp = new Date().toISOString();
                         console.log('Inserting patient into bed_queue with status: admitted');
@@ -152,14 +153,14 @@ export async function allocateEmergencyICUBed({ icuQueueId, doctorId, patientReq
 
                         if (!transferError) {
                             console.log(`Transferred ${candidateForTransfer.patient_name} to general bed ${generalBed.bed_number || generalBed.bed_id}`);
-                            
+
                             // Create discharge prediction for the transferred patient
                             if (transferredData && transferredData.length > 0) {
                                 const bedQueueId = transferredData[0].id;
                                 const predictedStayDays = 4; // Default stay for stable patients
                                 const predictedDischargeDate = new Date();
                                 predictedDischargeDate.setDate(predictedDischargeDate.getDate() + predictedStayDays);
-                                
+
                                 const { error: predictionError } = await supabase
                                     .from('discharge_predictions')
                                     .insert([{
@@ -170,14 +171,14 @@ export async function allocateEmergencyICUBed({ icuQueueId, doctorId, patientReq
                                         reasoning: 'Stable patient transferred from ICU to general ward. Estimated recovery time based on improved condition.',
                                         created_at: new Date().toISOString(),
                                     }]);
-                                
+
                                 if (predictionError) {
                                     console.error('Error creating discharge prediction:', predictionError);
                                 } else {
                                     console.log(`Created discharge prediction: ${predictedStayDays} days`);
                                 }
                             }
-                            
+
                             // Mark general bed as occupied
                             const { error: bedUpdateError } = await supabase
                                 .from('beds')
@@ -187,6 +188,15 @@ export async function allocateEmergencyICUBed({ icuQueueId, doctorId, patientReq
                             if (bedUpdateError) {
                                 console.error('Error updating general bed status:', bedUpdateError);
                             }
+
+                            // Send Notification (Non-blocking)
+                            sendBedAssignmentNotification({
+                                patientName: candidateForTransfer.patient_name,
+                                bedNumber: generalBed.bed_number,
+                                bedType: 'general',
+                                appointmentId: null, // We'll try to fetch phone via token inside the service
+                                tokenNumber: candidateForTransfer.patient_token
+                            });
 
                             // Free up the ICU bed
                             await supabase
@@ -261,7 +271,7 @@ export async function allocateEmergencyICUBed({ icuQueueId, doctorId, patientReq
                 bedFreed: bedWasFreed,
                 transferredPatient: transferredPatientName,
                 bed: assignedBed,
-                message: bedWasFreed 
+                message: bedWasFreed
                     ? `ICU bed ${assignedBed.bed_id} assigned (transferred ${transferredPatientName} to general ward)`
                     : `ICU bed ${assignedBed.bed_id} assigned successfully`
             };

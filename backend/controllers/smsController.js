@@ -56,3 +56,42 @@ export const sendSMS = async (req, res) => {
         });
     }
 };
+
+/**
+ * POST /api/sms/send-bed-notification
+ * Body: { phone, patientName, bedNumber, bedType }
+ */
+export const sendBedSMS = async (req, res) => {
+    try {
+        const { phone, patientName, bedNumber, bedType } = req.body;
+
+        if (!phone) {
+            return res.status(400).json({ success: false, error: "Phone number is required." });
+        }
+
+        const messageBody =
+            `🏨 *Bed Assigned Successfully* 🏨\n\n` +
+            `Hello ${patientName || "Patient"},\n\n` +
+            `A bed has been assigned to you in the General Ward.\n\n` +
+            `📋 *Details:*\n` +
+            `• Bed Number : ${bedNumber || "N/A"}\n` +
+            `• Bed Type   : ${bedType || "General"}\n\n` +
+            `Please proceed to the ward reception for further assistance.\n\n` +
+            `– Hospital Management System`;
+
+        const message = await sendAppointmentSMS(phone, messageBody);
+
+        return res.status(200).json({
+            success: true,
+            message: "Bed assignment notification sent successfully.",
+            sid: message.sid,
+        });
+    } catch (error) {
+        console.error("[SMS Controller] Error sending Bed SMS:", error.message);
+        return res.status(500).json({
+            success: false,
+            error: "Failed to send bed assignment notification.",
+            details: error.message,
+        });
+    }
+};

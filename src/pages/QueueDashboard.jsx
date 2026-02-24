@@ -163,7 +163,7 @@ export default function QueueDashboard() {
             // Fetch active queue (waiting + in_progress)
             const { data: activeData } = await supabase
                 .from('opd_queue')
-                .select('*')
+                .select('*, appointments(phone)')
                 .eq('doctor_id', user.id)
                 .in('status', ['waiting', 'in_progress'])
                 .order('queue_position', { ascending: true });
@@ -265,6 +265,7 @@ export default function QueueDashboard() {
                     disease: queueEntry.disease,
                     token_number: queueEntry.token_number,
                     doctor_id: queueEntry.doctor_id,
+                    phone: queueEntry.appointments?.phone || null,
                     bed_type: 'general',
                     status: 'waiting_for_bed',
                     admitted_from_opd_at: new Date().toISOString(),

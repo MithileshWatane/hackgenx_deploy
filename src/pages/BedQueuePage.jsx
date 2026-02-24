@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { useAuth } from '../context/AuthContext_simple';
 import { supabase } from '../lib/supabase';
 import { processWaitingQueue, assignSinglePatient } from '../services/autoBedAssignmentService';
+import { sendBedAssignmentNotification } from '../services/bedNotificationService';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -109,7 +110,7 @@ function AssignBedModal({ patient, onClose, onAssign, assigning }) {
             try {
                 // Get current user
                 const { data: { user } } = await supabase.auth.getUser();
-                
+
                 // Fetch only beds belonging to current doctor
                 const { data, error: fetchError } = await supabase
                     .from('beds')
@@ -119,13 +120,13 @@ function AssignBedModal({ patient, onClose, onAssign, assigning }) {
                     .order('bed_number', { ascending: true });
 
                 if (fetchError) throw fetchError;
-                
+
                 // Normalize the data - ensure we have 'id' property
                 const normalizedData = (data || []).map(bed => ({
                     ...bed,
                     id: bed.id || bed.bed_id
                 }));
-                
+
                 console.log('Fetched beds:', normalizedData);
                 setAvailableBeds(normalizedData);
             } catch (err) {
@@ -142,21 +143,21 @@ function AssignBedModal({ patient, onClose, onAssign, assigning }) {
         e.preventDefault();
         console.log('Submit - selectedBedId:', selectedBedId);
         console.log('Available beds:', availableBeds);
-        
+
         if (!selectedBedId) { setError('Please select a bed.'); return; }
-        
+
         const bed = availableBeds.find(b => {
             const bedId = b.id || b.bed_id;
             return String(bedId) === String(selectedBedId);
         });
-        
+
         console.log('Found bed:', bed);
-        
-        if (!bed) { 
-            setError('Selected bed not found. Please try again.'); 
-            return; 
+
+        if (!bed) {
+            setError('Selected bed not found. Please try again.');
+            return;
         }
-        
+
         const bedId = bed.id || bed.bed_id;
         onAssign({ bedId: bedId, bedType: bed.bed_type, bedNumber: bed.bed_number });
     };
@@ -212,10 +213,10 @@ function AssignBedModal({ patient, onClose, onAssign, assigning }) {
                         ) : (
                             <select
                                 value={selectedBedId}
-                                onChange={(e) => { 
+                                onChange={(e) => {
                                     console.log('Selected bed ID:', e.target.value);
-                                    setSelectedBedId(e.target.value); 
-                                    setError(''); 
+                                    setSelectedBedId(e.target.value);
+                                    setError('');
                                 }}
                                 disabled={assigning}
                                 className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-[#2b8cee]/30 focus:border-[#2b8cee] transition-all bg-white"
@@ -286,7 +287,7 @@ export default function BedQueuePage() {
                 .order('admitted_from_opd_at', { ascending: true });
 
             const { data: allData } = await allQuery;
-            
+
             // For filtered display, apply the active filter
             let filteredData = allData || [];
             if (activeFilter !== 'all') {
@@ -294,21 +295,21 @@ export default function BedQueuePage() {
             }
 
             setBedQueue(filteredData);
-            
+
             // Update stats based on all data
             const allStats = {
                 waiting: (allData || []).filter(p => p.status === 'waiting_for_bed').length,
                 assigned: (allData || []).filter(p => p.status === 'bed_assigned').length,
                 admitted: (allData || []).filter(p => p.status === 'admitted').length,
             };
-            
+
             // Update filters state with correct counts
             setFilters([
                 { key: 'all', label: 'Active', count: (allData || []).length },
                 { key: 'waiting_for_bed', label: 'Waiting', count: allStats.waiting },
                 { key: 'admitted', label: 'Admitted', count: allStats.admitted },
             ]);
-            
+
         } catch (err) {
             console.error('Bed queue fetch error:', err);
         } finally {
@@ -319,11 +320,11 @@ export default function BedQueuePage() {
     useEffect(() => {
         fetchBedQueue();
         const interval = setInterval(fetchBedQueue, 30000);
-        
+
         // Subscribe to realtime changes on bed_queue table
         const bedQueueSubscription = supabase
             .channel('bed_queue_changes')
-            .on('postgres_changes', 
+            .on('postgres_changes',
                 { event: '*', schema: 'public', table: 'bed_queue' },
                 (payload) => {
                     console.log('Bed queue change received:', payload);
@@ -331,11 +332,11 @@ export default function BedQueuePage() {
                 }
             )
             .subscribe();
-        
+
         // Subscribe to realtime changes on beds table (when beds become available)
         const bedsSubscription = supabase
             .channel('beds_changes')
-            .on('postgres_changes', 
+            .on('postgres_changes',
                 { event: '*', schema: 'public', table: 'beds' },
                 (payload) => {
                     console.log('Beds change received:', payload);
@@ -343,7 +344,7 @@ export default function BedQueuePage() {
                 }
             )
             .subscribe();
-        
+
         return () => {
             clearInterval(interval);
             supabase.removeChannel(bedQueueSubscription);
@@ -437,7 +438,17 @@ export default function BedQueuePage() {
 
             if (bedError) throw bedError;
 
-            // 3. Create Admission Record
+            // 3. Send Notification (Non-blocking)
+            sendBedAssignmentNotification({
+                patientName: assignModalPatient.patient_name,
+                bedNumber: bedNumber,
+                bedType: bedType,
+                phone: assignModalPatient.phone,
+                appointmentId: assignModalPatient.appointment_id,
+                tokenNumber: assignModalPatient.token_number
+            });
+
+            // 4. Create Admission Record
             // We need patient_id but bed_queue might not have it directly if it was just text
             // In a better system, bed_queue would have patient_id
 

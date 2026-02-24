@@ -1,4 +1,5 @@
 import { supabase } from '../lib/supabase';
+import { sendBedAssignmentNotification } from './bedNotificationService';
 
 /**
  * Auto-assigns an available bed to a patient in the bed queue.
@@ -19,12 +20,12 @@ export async function autoAssignBed(queueEntryId, patientName, bedType = 'genera
             .eq('status', 'available')
             .eq('bed_type', bedType)
             .order('bed_number', { ascending: true });
-        
+
         // Filter by doctor if provided
         if (doctorId) {
             bedQuery = bedQuery.eq('doctor_id', doctorId);
         }
-        
+
         const { data: availableBeds, error: bedError } = await bedQuery;
 
         if (bedError) throw bedError;
@@ -57,6 +58,23 @@ export async function autoAssignBed(queueEntryId, patientName, bedType = 'genera
                 .eq('bed_id', bedId);
 
             if (bedUpdateError) throw bedUpdateError;
+
+            // Send notification (Non-blocking)
+            // Fetch queue entry to get phone/token if possible
+            const { data: queueData } = await supabase
+                .from('bed_queue')
+                .select('phone, appointment_id, token_number')
+                .eq('id', queueEntryId)
+                .single();
+
+            sendBedAssignmentNotification({
+                patientName: patientName,
+                bedNumber: selectedBed.bed_number,
+                bedType: bedType,
+                phone: queueData?.phone,
+                appointmentId: queueData?.appointment_id,
+                tokenNumber: queueData?.token_number
+            });
 
             // 3. Create default discharge prediction (4 days)
             const predictedDate = new Date();
@@ -253,11 +271,11 @@ export async function assignSinglePatient(doctorId = null) {
             .eq('status', 'waiting_for_bed')
             .order('admitted_from_opd_at', { ascending: true })
             .limit(1);
-        
+
         if (doctorId) {
             patientQuery = patientQuery.eq('doctor_id', doctorId);
         }
-        
+
         const { data: waitingPatients, error } = await patientQuery;
 
         if (error) throw error;
@@ -275,11 +293,11 @@ export async function assignSinglePatient(doctorId = null) {
             .eq('status', 'available')
             .order('bed_number', { ascending: true })
             .limit(1);
-        
+
         if (doctorId) {
             bedQuery = bedQuery.eq('doctor_id', doctorId);
         }
-        
+
         const { data: availableBeds, error: bedError } = await bedQuery;
 
         if (bedError) throw bedError;
@@ -315,6 +333,16 @@ export async function assignSinglePatient(doctorId = null) {
             .eq('bed_id', bedId);
 
         if (bedUpdateError) throw bedUpdateError;
+
+        // Send Notification (Non-blocking)
+        sendBedAssignmentNotification({
+            patientName: patient.patient_name,
+            bedNumber: bed.bed_number,
+            bedType: bed.bed_type,
+            phone: patient.phone,
+            appointmentId: patient.appointment_id,
+            tokenNumber: patient.token_number
+        });
 
         // Create default discharge prediction (4 days)
         const predictedDate = new Date();
@@ -375,11 +403,11 @@ export async function processWaitingQueue(doctorId = null) {
             .select('*')
             .eq('status', 'waiting_for_bed')
             .order('admitted_from_opd_at', { ascending: true });
-        
+
         if (doctorId) {
             patientQuery = patientQuery.eq('doctor_id', doctorId);
         }
-        
+
         const { data: waitingPatients, error } = await patientQuery;
 
         if (error) throw error;
@@ -394,11 +422,11 @@ export async function processWaitingQueue(doctorId = null) {
             .select('*')
             .eq('status', 'available')
             .order('bed_number', { ascending: true });
-        
+
         if (doctorId) {
             bedQuery = bedQuery.eq('doctor_id', doctorId);
         }
-        
+
         const { data: availableBeds, error: bedError } = await bedQuery;
 
         if (bedError) throw bedError;
@@ -446,6 +474,16 @@ export async function processWaitingQueue(doctorId = null) {
                 console.error(`Failed to update bed status for ${bed.bed_number}:`, bedUpdateError);
                 continue;
             }
+
+            // Send Notification (Non-blocking)
+            sendBedAssignmentNotification({
+                patientName: patient.patient_name,
+                bedNumber: bed.bed_number,
+                bedType: bed.bed_type,
+                phone: patient.phone,
+                appointmentId: patient.appointment_id,
+                tokenNumber: patient.token_number
+            });
 
             // Create default discharge prediction (4 days)
             const predictedDate = new Date();
