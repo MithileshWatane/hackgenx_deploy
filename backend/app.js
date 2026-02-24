@@ -28,6 +28,7 @@ app.use("/api/schedule", schedulerRoutes);
 app.use("/api/appointments", appointmentRoutes);
 app.use("/api/chatbot", chatbotRoutes);
 app.use("/api/telegram", telegramRoutes);
+app.use("/api/sms", smsRoutes);
 
 // error handling middleware
 app.use(errorHandler);
