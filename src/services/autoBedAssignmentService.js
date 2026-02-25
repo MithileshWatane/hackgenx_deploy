@@ -125,7 +125,7 @@ export async function autoAssignBed(queueEntryId, patientName, bedType = 'genera
             .order('admitted_from_opd_at', { ascending: true });
 
         // Find this patient's position (0 = first, 1 = second, etc.)
-        const queuePosition = waitingPatients?.findIndex(p => p.id === queueEntryId) ?? 0;
+        let queuePosition = waitingPatients?.findIndex(p => p.id === queueEntryId) ?? 0;
         if (queuePosition === -1) queuePosition = waitingPatients?.length || 0;
 
         const waitTimeMinutes = await calculateEstimatedWaitTime(bedType, queuePosition);
