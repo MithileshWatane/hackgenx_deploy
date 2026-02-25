@@ -111,12 +111,34 @@ export async function getPatientById(patientId, queueType) {
         .eq('token_number', queueData.patient_token)
         .single();
       
+      // If patient came from general ward, fetch the bed queue history
+      let originalBedData = null;
+      if (queueData.original_bed_id) {
+        const { data: bedData, error: bedError } = await supabase
+          .from('bed_queue')
+          .select('admitted_from_opd_at, bed_assigned_at, admitted_at, bed_type')
+          .eq('bed_id', queueData.original_bed_id)
+          .eq('token_number', queueData.patient_token)
+          .order('created_at', { ascending: false })
+          .limit(1)
+          .single();
+        
+        if (!bedError && bedData) {
+          originalBedData = bedData;
+        }
+      }
+      
       // Merge the data
       const mergedData = {
         ...queueData,
         queue_type: 'icu',
         age: appointmentData?.age || null,
-        phone: appointmentData?.phone || null
+        phone: appointmentData?.phone || null,
+        // Include original bed queue timestamps if available
+        admitted_from_opd_at: originalBedData?.admitted_from_opd_at || queueData.admitted_from_opd_at,
+        bed_assigned_at: originalBedData?.bed_assigned_at || queueData.bed_assigned_at,
+        admitted_at: originalBedData?.admitted_at || queueData.admitted_at,
+        original_bed_type: originalBedData?.bed_type
       };
       
       return { data: mergedData, error: null };

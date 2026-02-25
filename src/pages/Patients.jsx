@@ -108,7 +108,7 @@ export default function Patients() {
         const bedAssignedAt = patient.bed_assigned_at || patient.admitted_at;
         
         // ICU timestamps (if ICU patient)
-        const icuQueueTime = patient.time; // from icu_queue
+        const icuQueueTime = patient.time;
         const icuAdmissionTime = patient.admission_time;
         
         // Discharge timestamp
@@ -122,7 +122,8 @@ export default function Patients() {
             label: 'Appointment',
             time: formatTime(appointmentDate) || formatTime(patient.created_at) || 'Scheduled',
             done: true,
-            active: false
+            active: false,
+            hasRealDate: !!appointmentDate || !!patient.created_at
         });
         
         // 2. OPD Queue - always shown
@@ -132,57 +133,58 @@ export default function Patients() {
             label: 'OPD Queue',
             time: formatTime(opdEnteredAt) || formatTime(opdCompletedAt) || (opdDone ? 'Completed' : 'Pending'),
             done: opdDone,
-            active: !!opdEnteredAt && !opdDone
+            active: !!opdEnteredAt && !opdDone,
+            hasRealDate: !!opdEnteredAt || !!opdCompletedAt || opdDone
         });
         
-        // 3. Bed Queue - always shown (mark as N/A if skipped for ICU)
+        // 3. Bed Queue - show actual time if patient came from ward, otherwise hide
         const inBedQueue = !!bedQueueEnteredAt;
-        const bedQueueDone = !!bedAssignedAt && !isICU;
-        const bedQueueSkipped = isICU && !!icuAdmissionTime && !bedAssignedAt;
+        const bedQueueDone = !!bedAssignedAt;
         steps.push({
             icon: 'hotel',
             label: 'Bed Queue',
-            time: bedQueueSkipped 
-                ? 'Skipped (Direct ICU)' 
-                : (formatTime(bedQueueEnteredAt) || (inBedQueue ? 'In Queue' : (isICU ? 'N/A' : 'Pending'))),
+            time: inBedQueue 
+                ? formatTime(bedQueueEnteredAt) 
+                : (isICU && !bedQueueDone ? 'N/A' : 'Pending'),
             done: bedQueueDone,
-            active: !bedQueueSkipped && inBedQueue && !bedQueueDone,
-            skipped: bedQueueSkipped
+            active: !isICU && inBedQueue && !bedAssignedAt,
+            hasRealDate: inBedQueue || bedQueueDone
         });
         
-        // 4. General Ward Assignment - always shown
-        const wardAssigned = !!bedAssignedAt && !isICU;
-        const wardSkipped = isICU && !!icuAdmissionTime;
+        // 4. Ward Assignment - show actual time if patient was in ward before ICU
+        const wardAssigned = !!bedAssignedAt;
         steps.push({
             icon: 'bed',
             label: 'Ward Assignment',
-            time: wardSkipped
-                ? 'Skipped (ICU Direct)'
-                : (formatTime(bedAssignedAt) || (wardAssigned ? 'Assigned' : (isICU ? 'N/A' : 'Pending'))),
+            time: wardAssigned 
+                ? formatTime(bedAssignedAt) 
+                : (isICU ? 'N/A' : 'Pending'),
             done: wardAssigned,
-            active: !wardSkipped && bedQueueDone && !wardAssigned,
-            skipped: wardSkipped
+            active: !isICU && inBedQueue && !wardAssigned,
+            hasRealDate: wardAssigned
         });
         
-        // 5. ICU Queue - always shown
+        // 5. ICU Queue - same for ICU and ward (shows N/A for ward)
         const inIcuQueue = !!icuQueueTime && !icuAdmissionTime;
         const icuQueueDone = !!icuAdmissionTime;
         steps.push({
             icon: 'local_hospital',
             label: 'ICU Queue',
-            time: formatTime(icuQueueTime) || (inIcuQueue ? 'Waiting' : (icuQueueDone ? 'Admitted' : 'N/A')),
-            done: icuQueueDone,
-            active: inIcuQueue
+            time: !isICU ? 'N/A' : (formatTime(icuQueueTime) || (inIcuQueue ? 'Waiting' : (icuQueueDone ? 'Admitted' : 'Pending'))),
+            done: isICU && icuQueueDone,
+            active: isICU && inIcuQueue,
+            hasRealDate: isICU && !!icuQueueTime
         });
         
-        // 6. ICU Assignment - always shown
+        // 6. ICU Assignment - same for ICU and ward (shows N/A for ward)
         const icuAdmitted = !!icuAdmissionTime;
         steps.push({
             icon: 'monitor_heart',
             label: 'ICU Assignment',
-            time: formatTime(icuAdmissionTime) || (icuAdmitted ? 'Admitted' : 'N/A'),
-            done: icuAdmitted,
-            active: isICU && !isDischarged
+            time: !isICU ? 'N/A' : (formatTime(icuAdmissionTime) || (icuAdmitted ? 'Admitted' : 'Pending')),
+            done: isICU && icuAdmitted,
+            active: isICU && !isDischarged,
+            hasRealDate: isICU && icuAdmitted
         });
         
         // 7. Discharge - always shown
@@ -195,10 +197,11 @@ export default function Patients() {
                     ? `Est: ${new Date(prediction.predicted_discharge_date).toLocaleDateString()}` 
                     : 'Pending'),
             done: isDischarged,
-            active: false
+            active: false,
+            hasRealDate: true // Always show discharge
         });
         
-        return steps;
+        return steps.filter(step => step.hasRealDate || step.label === 'Discharge');
     };
 
     // If no patient selected, show a message
@@ -254,7 +257,7 @@ export default function Patients() {
         );
     }
 
-    const journeySteps = getJourneySteps().filter(step => !step.skipped);
+    const journeySteps = getJourneySteps();
     const patientName = patient.patient_name;
     const patientId_display = patient.token_number || patient.patient_token || patient.id.slice(0, 8);
     const patientAge = patient.age || 'N/A';
@@ -401,17 +404,6 @@ export default function Patients() {
                                                             <div className="text-center">
                                                                 <p className="font-bold text-[#2b8cee] text-sm">{step.label}</p>
                                                                 <p className="text-xs text-[#2b8cee] font-medium">{step.time}</p>
-                                                            </div>
-                                                        </div>
-                                                    );
-                                                    if (step.skipped) return (
-                                                        <div key={step.label} className="flex flex-col items-center gap-3 opacity-50">
-                                                            <div className="size-14 rounded-full bg-slate-200 text-slate-500 border-4 border-white flex items-center justify-center">
-                                                                <span className="material-symbols-outlined">{step.icon}</span>
-                                                            </div>
-                                                            <div className="text-center">
-                                                                <p className="font-medium text-slate-500 text-sm">{step.label}</p>
-                                                                <p className="text-xs text-slate-400 italic">{step.time}</p>
                                                             </div>
                                                         </div>
                                                     );

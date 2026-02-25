@@ -67,7 +67,7 @@ function QueueItem({ item, onClick }) {
             </div>
             <div className="shrink-0">
                 <button className="px-3 py-1.5 text-xs font-bold rounded transition-colors bg-[#2b8cee]/10 hover:bg-[#2b8cee]/20 text-[#2b8cee]">
-                    View Details
+                    Details
                 </button>
             </div>
         </div>
@@ -177,8 +177,8 @@ export default function AIPrediction() {
                 {/* Toolbar */}
                 <div className="px-6 py-5 flex items-center justify-between shrink-0 flex-wrap gap-3 bg-white border-b border-slate-200 shadow-sm">
                     <div>
-                        <h1 className="text-2xl font-black text-slate-900 tracking-tight">Patient Predictions</h1>
-                        <p className="text-slate-500 text-sm">Active Patients • AI-Powered Discharge Predictions</p>
+                        <h1 className="text-2xl font-black text-slate-900 tracking-tight">Patients Data</h1>
+                        <p className="text-slate-500 text-sm">Active Patients • Real-time Status & Analytics</p>
                     </div>
                     <div className="flex gap-2">
                         <div className="flex w-56 items-center bg-slate-50 rounded-lg border border-slate-200 px-3 h-10">

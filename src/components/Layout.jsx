@@ -8,9 +8,8 @@ const navItems = [
     { icon: 'monitor_heart', label: 'ICU Queue', path: '/icu-queue' },
     { icon: 'meeting_room', label: 'Bed Scheduling', path: '/bed-management' },
     { icon: 'schedule', label: 'ICU Scheduling', path: '/icu-scheduling' },
-    { icon: 'groups', label: 'Patients', path: '/patients' },
     { icon: 'calendar_today', label: 'Appointments', path: '/appointments' },
-    { icon: 'psychology', label: 'AI Prediction', path: '/ai-prediction' },
+    { icon: 'psychology', label: 'Patients Data', path: '/ai-prediction' },
 ];
 
 export default function Layout({ children }) {
