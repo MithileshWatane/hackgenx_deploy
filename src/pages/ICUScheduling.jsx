@@ -40,6 +40,15 @@ export default function ICUScheduling() {
     dialysis_available: false,
     is_available: true,
   });
+  const [schedulingPolicyText, setSchedulingPolicyText] = useState(() => {
+    try {
+      return localStorage.getItem("icu-scheduling-policy-feedback") || "";
+    } catch {
+      return "";
+    }
+  });
+  const [feedbackSubmitted, setFeedbackSubmitted] = useState(false);
+  const [feedbackSubmitting, setFeedbackSubmitting] = useState(false);
 
   const handleRunOptimized = async () => {
     setLoadingType("optimized");
@@ -619,6 +628,67 @@ export default function ICUScheduling() {
                 your team before acting.
               </p>
             </div>
+          </div>
+
+          {/* Natural language scheduling policy (frontend only — not connected to backend) */}
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 mb-6">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="material-symbols-outlined text-[#2b8cee] text-xl">
+                edit_note
+              </span>
+              <h3 className="text-sm font-bold text-slate-900 uppercase tracking-wide">
+                Scheduling policy changes (natural language)
+              </h3>
+            </div>
+            <p className="text-sm text-slate-600 mb-3">
+              Enter your scheduling rules in plain language. For example: priority for ventilator patients, tie-break by arrival time, or which bed categories apply to which conditions. This will be used to configure bed assignment and priority rules when connected to the policy service.
+            </p>
+            <textarea
+              value={schedulingPolicyText}
+              onChange={(e) => {
+                setSchedulingPolicyText(e.target.value);
+                setFeedbackSubmitted(false);
+              }}
+              placeholder="e.g. Prioritize patients on ventilator. Assign critical beds to sepsis and cardiac arrest. Tie-break by earliest arrival time. Pediatric patients only in designated pediatric beds."
+              rows={5}
+              className="w-full px-4 py-3 border border-slate-300 rounded-xl text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-[#2b8cee] focus:border-[#2b8cee] resize-y min-h-[120px]"
+            />
+            <div className="mt-3 flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                disabled={feedbackSubmitting}
+                onClick={() => {
+                  setFeedbackSubmitting(true);
+                  try {
+                    localStorage.setItem("icu-scheduling-policy-feedback", schedulingPolicyText);
+                  } catch (_) {}
+                  setTimeout(() => {
+                    setFeedbackSubmitting(false);
+                    setFeedbackSubmitted(true);
+                  }, 3000);
+                }}
+                className="inline-flex items-center gap-2 rounded-lg px-4 py-2 bg-[#2b8cee] hover:bg-blue-600 text-white text-sm font-semibold shadow-sm transition-colors disabled:opacity-70 disabled:cursor-not-allowed"
+              >
+                {feedbackSubmitting ? (
+                  <>
+                    <span className="material-symbols-outlined text-[18px] animate-spin">progress_activity</span>
+                    Submitting…
+                  </>
+                ) : (
+                  <>
+                    <span className="material-symbols-outlined text-[18px]">send</span>
+                    Submit feedback
+                  </>
+                )}
+              </button>
+              {feedbackSubmitted && !feedbackSubmitting && (
+                <span className="inline-flex items-center gap-1.5 text-sm text-green-600 font-medium">
+                  <span className="material-symbols-outlined text-[18px]">check_circle</span>
+                  Feedback submitted
+                </span>
+              )}
+            </div>
+           
           </div>
         </>
 
