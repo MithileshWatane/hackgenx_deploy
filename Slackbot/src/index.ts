@@ -61,6 +61,9 @@ class DoctorAIAssistant {
     this.mcpServer.registerTool(ToolRegistry.createRetrieveMemoryTool(this.ragEngine));
     this.mcpServer.registerTool(ToolRegistry.createStoreMemoryTool(this.ragEngine));
 
+    // Patient tools
+    this.mcpServer.registerTool(ToolRegistry.createRegisterPatientTool());
+
     // Scheduling tools
     this.mcpServer.registerTool(ToolRegistry.createScheduleSurgeryTool());
     this.mcpServer.registerTool(ToolRegistry.createCheckAvailabilityTool());

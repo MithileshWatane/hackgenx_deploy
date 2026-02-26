@@ -15,7 +15,7 @@ This system implements a modern, LLM-native architecture where:
 7. **No hardcoded routing** - All flow decisions are made by the LLM
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
+┌─────────────────────────────────────────────────────────────────┐ 
 │                         SLACK INTERFACE                         │
 │                    (Bolt SDK - Socket Mode)                     │
 └────────────────────────────┬────────────────────────────────────┘

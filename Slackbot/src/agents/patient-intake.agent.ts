@@ -38,6 +38,7 @@ Be thorough and compassionate when gathering sensitive information.`,
       tools: [
         'retrieveMemory',
         'storeMemory',
+        'registerPatient',
         'sendSlackMessage',
         'sendAgentMessage',
         'logAudit',

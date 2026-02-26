@@ -357,4 +357,97 @@ export class ToolRegistry {
       },
     };
   }
+
+  static createRegisterPatientTool(): MCPTool {
+    return {
+      name: 'registerPatient',
+      description: 'Register a new patient in the system',
+      parameters: {
+        type: 'object',
+        properties: {
+          firstName: {
+            type: 'string',
+            description: 'Patient first name',
+          },
+          lastName: {
+            type: 'string',
+            description: 'Patient last name',
+          },
+          email: {
+            type: 'string',
+            description: 'Patient email address (optional)',
+          },
+          phoneNumber: {
+            type: 'string',
+            description: 'Patient phone number',
+          },
+          dateOfBirth: {
+            type: 'string',
+            description: 'Patient date of birth (ISO 8601 format: YYYY-MM-DD)',
+          },
+          medicalRecordId: {
+            type: 'string',
+            description: 'Medical record ID (auto-generated if not provided)',
+          },
+          ssn: {
+            type: 'string',
+            description: 'Social Security Number (optional, will be encrypted)',
+          },
+          address: {
+            type: 'string',
+            description: 'Patient address (optional, will be encrypted)',
+          },
+        },
+        required: ['firstName', 'lastName', 'phoneNumber', 'dateOfBirth'],
+      },
+      handler: async (params) => {
+        // Generate medical record ID if not provided
+        const medicalRecordId = params.medicalRecordId || `MRN-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
+
+        // Create patient record
+        const patient = await prisma.patient.create({
+          data: {
+            firstName: params.firstName,
+            lastName: params.lastName,
+            email: params.email,
+            phoneNumber: params.phoneNumber,
+            dateOfBirth: new Date(params.dateOfBirth),
+            medicalRecordId: medicalRecordId,
+            encryptedSSN: params.ssn, // TODO: Implement encryption
+            encryptedAddress: params.address, // TODO: Implement encryption
+          },
+        });
+
+        await AuditService.logAudit({
+          agentName: 'PatientIntakeAgent',
+          action: 'register_patient',
+          resource: 'patient',
+          resourceId: patient.id,
+          details: { 
+            firstName: params.firstName, 
+            lastName: params.lastName,
+            medicalRecordId: medicalRecordId 
+          },
+        });
+
+        logger.info('Patient registered successfully', { 
+          patientId: patient.id, 
+          medicalRecordId: medicalRecordId 
+        });
+
+        return { 
+          success: true, 
+          patient: {
+            id: patient.id,
+            firstName: patient.firstName,
+            lastName: patient.lastName,
+            email: patient.email,
+            phoneNumber: patient.phoneNumber,
+            dateOfBirth: patient.dateOfBirth,
+            medicalRecordId: patient.medicalRecordId,
+          }
+        };
+      },
+    };
+  }
 }

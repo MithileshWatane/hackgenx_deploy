@@ -205,7 +205,7 @@ When ready to respond to the user, use Action: respond.`;
     const thoughtMatch = response.match(/Thought:\s*(.+?)(?=\n|$)/i);
     const actionMatch = response.match(/Action:\s*(.+?)(?=\n|$)/i);
     const toolMatch = response.match(/Tool:\s*(.+?)(?=\n|$)/i);
-    const toolInputMatch = response.match(/ToolInput:\s*(\{.+?\})/is);
+    const toolInputMatch = response.match(/ToolInput:\s*(\{[\s\S]*?\})\s*(?=\n\w+:|$)/i);
     const observationMatch = response.match(/Observation:\s*(.+?)(?=\n|$)/is);
 
     const step: ReasoningStep = {
@@ -217,9 +217,19 @@ When ready to respond to the user, use Action: respond.`;
       step.tool = toolMatch?.[1]?.trim();
       if (toolInputMatch) {
         try {
-          step.toolInput = JSON.parse(toolInputMatch[1]);
+          const jsonStr = toolInputMatch[1].trim();
+          step.toolInput = JSON.parse(jsonStr);
         } catch (error) {
           logger.error('Failed to parse tool input:', toolInputMatch[1]);
+          // Try to extract JSON from the response more aggressively
+          const jsonMatch = response.match(/\{[\s\S]*"to"[\s\S]*"intent"[\s\S]*"payload"[\s\S]*\}/);
+          if (jsonMatch) {
+            try {
+              step.toolInput = JSON.parse(jsonMatch[0]);
+            } catch (e) {
+              logger.error('Failed secondary JSON parse attempt');
+            }
+          }
         }
       }
     }
