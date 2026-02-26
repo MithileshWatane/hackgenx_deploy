@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  # Doctor AI Assistant Application
+  app:
+    build: .
+    container_name: doctor-ai-app
+    environment:
+      # Slack Configuration
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN}
+      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET}
+      SLACK_APP_TOKEN: ${SLACK_APP_TOKEN}
+      
+      # Gemini Configuration
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-1.5-flash}
+      
+      # Database Configuration (Neon online PostgreSQL)
+      DATABASE_URL: ${DATABASE_URL}
+      
+      # Pinecone Configuration
+      PINECONE_API_KEY: ${PINECONE_API_KEY}
+      PINECONE_INDEX: ${PINECONE_INDEX:-doctor-ai-memory}
+      
+      # Security
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      PHI_ENCRYPTION_ENABLED: ${PHI_ENCRYPTION_ENABLED:-true}
+      
+      # Environment
+      NODE_ENV: ${NODE_ENV:-production}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+    command: >
+      sh -c "
+        echo 'Running database migrations...' &&
+        npx prisma migrate deploy &&
+        echo 'Starting application...' &&
+        npm start
+      "

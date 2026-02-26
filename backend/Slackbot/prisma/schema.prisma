@@ -1,0 +1,164 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Doctor {
+  id            String         @id @default(uuid())
+  email         String         @unique
+  name          String
+  specialization String?
+  phoneNumber   String?
+  slackUserId   String         @unique
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  
+  appointments  Appointment[]
+  reminders     Reminder[]
+  auditLogs     AuditLog[]
+  
+  @@map("doctors")
+}
+
+model Patient {
+  id              String         @id @default(uuid())
+  firstName       String
+  lastName        String
+  email           String?
+  phoneNumber     String
+  dateOfBirth     DateTime
+  medicalRecordId String         @unique
+  
+  // Encrypted PHI fields
+  encryptedSSN    String?
+  encryptedAddress String?
+  
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  
+  appointments    Appointment[]
+  intakes         PatientIntake[]
+  
+  @@map("patients")
+}
+
+model Appointment {
+  id              String         @id @default(uuid())
+  patientId       String
+  doctorId        String
+  appointmentType String         // surgery, consultation, follow-up
+  scheduledAt     DateTime
+  duration        Int            // in minutes
+  status          String         @default("scheduled") // scheduled, completed, cancelled
+  notes           String?
+  
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  
+  patient         Patient        @relation(fields: [patientId], references: [id])
+  doctor          Doctor         @relation(fields: [doctorId], references: [id])
+  reminders       Reminder[]
+  
+  @@map("appointments")
+  @@index([doctorId, scheduledAt])
+  @@index([patientId])
+}
+
+model PatientIntake {
+  id              String         @id @default(uuid())
+  patientId       String
+  chiefComplaint  String
+  symptoms        String?
+  duration        String?
+  severity        Int?           // 1-10 scale
+  medications     String?
+  allergies       String?
+  status          String         @default("pending") // pending, reviewed, completed
+  
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  
+  patient         Patient        @relation(fields: [patientId], references: [id])
+  
+  @@map("patient_intakes")
+}
+
+model Reminder {
+  id              String         @id @default(uuid())
+  doctorId        String
+  appointmentId   String?
+  reminderType    String         // appointment, medication, follow-up
+  title           String
+  description     String?
+  scheduledFor    DateTime
+  status          String         @default("pending") // pending, sent, cancelled
+  sentAt          DateTime?
+  
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  
+  doctor          Doctor         @relation(fields: [doctorId], references: [id])
+  appointment     Appointment?   @relation(fields: [appointmentId], references: [id])
+  
+  @@map("reminders")
+  @@index([doctorId, scheduledFor])
+}
+
+model AgentMessage {
+  id              String         @id @default(uuid())
+  fromAgent       String
+  toAgent         String
+  intent          String
+  payload         Json
+  status          String         @default("pending") // pending, processed, failed
+  processedAt     DateTime?
+  result          Json?
+  errorMessage    String?
+  
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+  
+  @@map("agent_messages")
+  @@index([toAgent, status])
+}
+
+model MemoryEmbedding {
+  id              String         @id @default(uuid())
+  content         String
+  embedding       String         // JSON array of floats
+  source          String         // slack, appointment, agent_message, patient_note
+  sourceId        String?
+  metadata        Json?
+  
+  createdAt       DateTime       @default(now())
+  
+  @@map("memory_embeddings")
+  @@index([source, sourceId])
+}
+
+model AuditLog {
+  id              String         @id @default(uuid())
+  doctorId        String?
+  agentName       String?
+  action          String
+  resource        String?
+  resourceId      String?
+  details         Json?
+  ipAddress       String?
+  userAgent       String?
+  
+  createdAt       DateTime       @default(now())
+  
+  doctor          Doctor?        @relation(fields: [doctorId], references: [id])
+  
+  @@map("audit_logs")
+  @@index([doctorId, createdAt])
+  @@index([agentName, createdAt])
+}
